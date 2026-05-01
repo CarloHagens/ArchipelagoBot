@@ -1,0 +1,13 @@
+services:
+  archipelago-bot:
+    image: {youruser}/archipelago-bot:latest
+    container_name: archipelago-bot
+    restart: unless-stopped
+    volumes:
+      - archipelago_src:/archipelago
+    environment:
+      - BOT_TOKEN={BOT_TOKEN}
+      - SERVER_PASSWORD={SERVER_PASSWORD}
+
+volumes:
+  archipelago_src:
