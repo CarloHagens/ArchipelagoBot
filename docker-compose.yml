@@ -1,6 +1,6 @@
 services:
   archipelago-bot:
-    image: {youruser}/archipelago-bot:latest
+    image: {username}/archipelago-bot:latest
     container_name: archipelago-bot
     restart: unless-stopped
     volumes:
