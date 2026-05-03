@@ -3,11 +3,19 @@ services:
     image: {username}/archipelago-bot:latest
     container_name: archipelago-bot
     restart: unless-stopped
+    command: python archipelago_bot.py
     volumes:
-      - archipelago_src:/archipelago
+      - /path/to/archipelago:/archipelago
+      - /path/to/roms:/roms:ro
     environment:
       - BOT_TOKEN={BOT_TOKEN}
       - SERVER_PASSWORD={SERVER_PASSWORD}
 
-volumes:
-  archipelago_src:
+  archipelago-versions:
+    image: {username}/archipelago-bot:latest
+    container_name: archipelago-versions
+    restart: unless-stopped
+    command: python version_manager.py
+    volumes:
+      - /path/to/archipelago:/archipelago
+      - /path/to/roms:/roms:ro

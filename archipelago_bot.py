@@ -1,4 +1,6 @@
 import asyncio
+import html
+import logging
 import os
 import re
 import subprocess
@@ -15,13 +17,8 @@ from discord import app_commands
 BOT_TOKEN       = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 SERVER_PASSWORD = os.environ.get("SERVER_PASSWORD", "archipelago")
 
-ARCHIPELAGO_DIR = Path("/archipelago")
-PLAYERS_DIR     = ARCHIPELAGO_DIR / "Players"
-WORLDS_DIR      = ARCHIPELAGO_DIR / "custom_worlds"
-OUTPUT_DIR      = ARCHIPELAGO_DIR / "output"
-HOST_YAML_PATH  = ARCHIPELAGO_DIR / "host.yaml"
-LOGS_DIR        = ARCHIPELAGO_DIR / "logs"
-
+VERSIONS_DIR     = Path("/archipelago/versions")
+ROMS_DIR         = Path("/roms")
 ARCHIPELAGO_BASE = "https://archipelago.gg"
 
 GITHUB_RELEASE_RE = re.compile(
@@ -35,7 +32,7 @@ VALID_SPOILER_MODES         = ["0", "1", "2", "3"]
 NUMBERED_LINE_PREFIXES = tuple(f"{i}." for i in range(1, 20))
 UTF8_BOM               = b'\xef\xbb\xbf'
 
-SERVER_KEYS   = {"release_mode", "collect_mode", "remaining_mode", "password", "server_password"}
+SERVER_KEYS    = {"release_mode", "collect_mode", "remaining_mode", "password", "server_password"}
 GENERATOR_KEYS = {"race", "spoiler"}
 
 DEFAULT_HOST_YAML = {
@@ -46,6 +43,13 @@ DEFAULT_HOST_YAML = {
     "generator": {"race": 0, "spoiler": 3},
 }
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)-8s %(name)s %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
+log = logging.getLogger('bot')
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.messages = True
@@ -53,6 +57,22 @@ intents.guilds = True
 
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
+
+
+# ── Version helpers ───────────────────────────────────────────────────────────
+
+def get_installed_versions() -> list[str]:
+    if not VERSIONS_DIR.exists():
+        return []
+    tags = [
+        d.name for d in VERSIONS_DIR.iterdir()
+        if d.is_dir() and (d / "Generate.py").exists()
+    ]
+    return sorted(tags, reverse=True)
+
+
+def get_version_dir(tag: str) -> Path:
+    return VERSIONS_DIR / tag
 
 
 # ── File helpers ──────────────────────────────────────────────────────────────
@@ -67,13 +87,13 @@ def apworld_stem(filename: str) -> str:
     return Path(filename).stem.lower()
 
 
-def zip_snapshot() -> set:
-    return set(OUTPUT_DIR.glob("AP_*.zip")) if OUTPUT_DIR.exists() else set()
+def zip_snapshot(output_dir: Path) -> set:
+    return set(output_dir.glob("AP_*.zip")) if output_dir.exists() else set()
 
 
 # ── GitHub apworld download ───────────────────────────────────────────────────
 
-def download_apworld_from_github(owner: str, repo: str, tag: str) -> Path:
+def download_apworld_from_github(owner: str, repo: str, tag: str, worlds_dir: Path) -> Path:
     api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
     resp = requests.get(api_url, timeout=30, headers={"Accept": "application/vnd.github+json"})
     resp.raise_for_status()
@@ -86,32 +106,32 @@ def download_apworld_from_github(owner: str, repo: str, tag: str) -> Path:
     download = requests.get(asset["browser_download_url"], timeout=120)
     download.raise_for_status()
 
-    dest = WORLDS_DIR / asset["name"]
+    dest = worlds_dir / asset["name"]
     dest.write_bytes(download.content)
     return dest
 
 
 # ── Thread file collection ────────────────────────────────────────────────────
 
-async def save_yaml_attachment(attachment, thread_dir: Path) -> Path:
-    dest = thread_dir / attachment.filename
+async def save_yaml_attachment(attachment, players_dir: Path) -> Path:
+    dest = players_dir / attachment.filename
     await attachment.save(dest)
     dest.write_bytes(normalise_yaml_bytes(dest.read_bytes()))
     return dest
 
 
-async def save_apworld_attachment(attachment, dest_dir: Path, thread, seen_stems: set) -> Path | None:
+async def save_apworld_attachment(attachment, worlds_dir: Path, thread, seen_stems: set) -> Path | None:
     stem = apworld_stem(attachment.filename)
     if stem in seen_stems:
         await thread.send(f"⚠️ Duplicate apworld for **{stem}**: attached file conflicts with a previously seen apworld. Please post only one.")
         return None
-    dest = dest_dir / attachment.filename
+    dest = worlds_dir / attachment.filename
     await attachment.save(dest)
     seen_stems.add(stem)
     return dest
 
 
-async def handle_github_link(match, thread, seen_stems: set, seen_repos: dict) -> Path | None | bool:
+async def handle_github_link(match, thread, seen_stems: set, seen_repos: dict, worlds_dir: Path) -> Path | None | bool:
     owner, repo, tag = match.group(1), match.group(2), match.group(3)
     repo_key  = f"{owner}/{repo}".lower()
     tag_lower = tag.lower()
@@ -129,7 +149,9 @@ async def handle_github_link(match, thread, seen_stems: set, seen_repos: dict) -
 
     try:
         loop = asyncio.get_running_loop()
-        dest = await loop.run_in_executor(None, download_apworld_from_github, owner, repo, tag)
+        dest = await loop.run_in_executor(
+            None, download_apworld_from_github, owner, repo, tag, worlds_dir
+        )
     except Exception as e:
         await thread.send(f"⚠️ Could not download apworld from {match.group(0)}: `{e}`")
         return None
@@ -143,30 +165,32 @@ async def handle_github_link(match, thread, seen_stems: set, seen_repos: dict) -
     return dest
 
 
-async def collect_files_from_thread(thread):
-    PLAYERS_DIR.mkdir(parents=True, exist_ok=True)
-    WORLDS_DIR.mkdir(parents=True, exist_ok=True)
+async def collect_files_from_thread(thread, version_dir: Path):
+    players_dir = version_dir / "Players"
+    worlds_dir  = version_dir / "custom_worlds"
+    players_dir.mkdir(parents=True, exist_ok=True)
+    worlds_dir.mkdir(parents=True, exist_ok=True)
 
     yaml_files, apworld_files = [], []
-    yaml_uploaders: dict  = {}
+    yaml_uploaders: dict    = {}
     seen_apworld_stems: set = set()
-    seen_repos: dict = {}
+    seen_repos: dict        = {}
 
     async for message in thread.history(limit=500, oldest_first=True):
         for attachment in message.attachments:
             name = attachment.filename.lower()
             if name.endswith(".yaml") or name.endswith(".yml"):
-                dest = await save_yaml_attachment(attachment, PLAYERS_DIR)
+                dest = await save_yaml_attachment(attachment, players_dir)
                 yaml_files.append(dest)
                 yaml_uploaders[attachment.filename] = message.author
             elif name.endswith(".apworld"):
-                dest = await save_apworld_attachment(attachment, WORLDS_DIR, thread, seen_apworld_stems)
+                dest = await save_apworld_attachment(attachment, worlds_dir, thread, seen_apworld_stems)
                 if dest is None:
                     return [], [], {}
                 apworld_files.append(dest)
 
         for match in GITHUB_RELEASE_RE.finditer(message.content or ""):
-            result = await handle_github_link(match, thread, seen_apworld_stems, seen_repos)
+            result = await handle_github_link(match, thread, seen_apworld_stems, seen_repos, worlds_dir)
             if result is False:
                 return [], [], {}
             if isinstance(result, Path):
@@ -177,21 +201,21 @@ async def collect_files_from_thread(thread):
 
 # ── Host YAML management ──────────────────────────────────────────────────────
 
-def load_host_yaml() -> dict:
-    if HOST_YAML_PATH.exists():
-        return yaml.safe_load(HOST_YAML_PATH.read_text(encoding="utf-8"))
+def load_host_yaml(host_yaml_path: Path) -> dict:
+    if host_yaml_path.exists():
+        return yaml.safe_load(host_yaml_path.read_text(encoding="utf-8"))
     return DEFAULT_HOST_YAML.copy()
 
 
-def save_host_yaml(config: dict) -> None:
-    HOST_YAML_PATH.write_text(
+def save_host_yaml(config: dict, host_yaml_path: Path) -> None:
+    host_yaml_path.write_text(
         yaml.dump(config, default_flow_style=False, allow_unicode=True),
         encoding="utf-8",
     )
 
 
-def apply_host_yaml_options(opts: dict) -> dict:
-    config = load_host_yaml()
+def apply_host_yaml_options(opts: dict, host_yaml_path: Path) -> dict:
+    config = load_host_yaml(host_yaml_path)
     originals = {}
     for key, value in opts.items():
         if key in SERVER_KEYS:
@@ -200,21 +224,21 @@ def apply_host_yaml_options(opts: dict) -> dict:
         elif key in GENERATOR_KEYS:
             originals[("generator", key)] = config["generator"].get(key)
             config["generator"][key] = value
-    save_host_yaml(config)
+    save_host_yaml(config, host_yaml_path)
     return originals
 
 
-def restore_host_yaml(originals: dict) -> None:
-    config = load_host_yaml()
+def restore_host_yaml(originals: dict, host_yaml_path: Path) -> None:
+    config = load_host_yaml(host_yaml_path)
     for (section, key), value in originals.items():
         config[section][key] = value
-    save_host_yaml(config)
+    save_host_yaml(config, host_yaml_path)
 
 
 # ── Generation log parsing ────────────────────────────────────────────────────
 
 def parse_generation_error(log_text: str) -> str | tuple:
-    lines   = log_text.splitlines()
+    lines    = log_text.splitlines()
     stripped = [line.strip() for line in lines]
 
     no_world = next((line for line in stripped if line.startswith("Exception: No world found")), None)
@@ -272,24 +296,36 @@ def _parse_friendly_errors(friendly_lines: list) -> str:
 
 # ── Generation runner ─────────────────────────────────────────────────────────
 
-def run_generation(opts: dict) -> tuple[bool, str]:
-    originals = apply_host_yaml_options(opts)
-    LOGS_DIR.mkdir(exist_ok=True)
-    before_logs = set(LOGS_DIR.glob("Generate_*.txt"))
+def run_generation(opts: dict, version_dir: Path) -> tuple[bool, str]:
+    host_yaml_path = version_dir / "host.yaml"
+    logs_dir       = version_dir / "logs"
+    lock_file      = version_dir / ".generating"
 
-    result = subprocess.run(
-        [sys.executable, str(ARCHIPELAGO_DIR / "Generate.py")],
-        cwd=str(ARCHIPELAGO_DIR),
-        input=b"\n" * 20,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    restore_host_yaml(originals)
+    originals = apply_host_yaml_options(opts, host_yaml_path)
+    logs_dir.mkdir(exist_ok=True)
+    before_logs = set(logs_dir.glob("Generate_*.txt"))
+
+    log.info(f"Running Generate.py for version {version_dir.name}...")
+    lock_file.touch()
+    try:
+        result = subprocess.run(
+            [sys.executable, str(version_dir / "Generate.py")],
+            cwd=str(version_dir),
+            input=b"\n" * 20,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    finally:
+        lock_file.unlink(missing_ok=True)
+
+    restore_host_yaml(originals, host_yaml_path)
 
     if result.returncode == 0:
+        log.info("Generation succeeded.")
         return True, ""
 
-    after_logs = set(LOGS_DIR.glob("Generate_*.txt"))
+    log.warning("Generation failed, parsing logs...")
+    after_logs = set(logs_dir.glob("Generate_*.txt"))
     new_logs   = sorted(after_logs - before_logs, key=lambda p: p.stat().st_mtime, reverse=True)
     if not new_logs:
         return False, "Generation failed but no log file was found."
@@ -298,9 +334,39 @@ def run_generation(opts: dict) -> tuple[bool, str]:
     return False, parse_generation_error(log_text)
 
 
+# ── YAML validation ───────────────────────────────────────────────────────────
+
+HTML_TAG_RE  = re.compile(r'<[^>]+>')
+CHECK_ROW_RE = re.compile(r'<tr[^>]*>.*?<td[^>]*>(.*?)</td>.*?<td[^>]*>(.*?)</td>.*?</tr>', re.DOTALL)
+
+
+def check_yamls_on_server(yaml_files: dict[str, bytes]) -> dict[str, str]:
+    """POST yaml files to archipelago.gg/check and return {filename: result}."""
+    files = [
+        ("file", (name, data, "application/x-yaml"))
+        for name, data in yaml_files.items()
+    ]
+    resp = requests.post(
+        f"{ARCHIPELAGO_BASE}/check",
+        files=files,
+        timeout=60,
+        headers={"User-Agent": "ArchipelagoDiscordBot/1.0"},
+    )
+    resp.raise_for_status()
+
+    results = {}
+    for match in CHECK_ROW_RE.finditer(resp.text):
+        filename = HTML_TAG_RE.sub("", match.group(1)).strip()
+        result   = HTML_TAG_RE.sub("", match.group(2)).strip()
+        if filename.endswith((".yaml", ".yml")):
+            results[filename] = result
+    return results
+
+
 # ── Room upload ───────────────────────────────────────────────────────────────
 
 def upload_and_create_room(zip_path: Path) -> str:
+    log.info(f"Uploading {zip_path.name} to archipelago.gg...")
     session = requests.Session()
     session.headers.update({"User-Agent": "ArchipelagoDiscordBot/1.0"})
 
@@ -322,6 +388,7 @@ def upload_and_create_room(zip_path: Path) -> str:
 
     if "/room/" not in room.url:
         raise RuntimeError(f"Unexpected redirect after room creation: {room.url}")
+    log.info(f"Room created: {room.url}")
     return room.url
 
 
@@ -331,14 +398,30 @@ def is_thread(interaction: discord.Interaction) -> bool:
     return isinstance(interaction.channel, discord.Thread)
 
 
+async def version_autocomplete(interaction: discord.Interaction, current: str):
+    return [
+        app_commands.Choice(name=v, value=v)
+        for v in get_installed_versions()
+        if current.lower() in v.lower()
+    ]
+
+
 @tree.command(name="status", description="List yaml and apworld files found in this thread")
 async def status(interaction: discord.Interaction):
     if not is_thread(interaction):
         await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
         return
 
+    log.info(f"/status invoked by {interaction.user} in #{interaction.channel.name}")
+    versions = get_installed_versions()
+    if not versions:
+        await interaction.response.send_message("⚠️ No Archipelago versions are installed yet. Please wait for the version manager to finish.", ephemeral=True)
+        return
+
     await interaction.response.send_message("🔍 Scanning thread history for files...")
-    yaml_files, apworld_files, _ = await collect_files_from_thread(interaction.channel)
+    yaml_files, apworld_files, _ = await collect_files_from_thread(
+        interaction.channel, get_version_dir(versions[0])
+    )
 
     yaml_list    = ", ".join(f"`{f.name}`" for f in yaml_files) or "none"
     apworld_list = ", ".join(f"`{f.name}`" for f in apworld_files) or "none"
@@ -347,6 +430,89 @@ async def status(interaction: discord.Interaction):
         f"📄 **YAMLs ({len(yaml_files)}):** {yaml_list}\n"
         f"🌍 **APworlds ({len(apworld_files)}):** {apworld_list}"
     )
+
+
+@tree.command(name="last_output", description="Attach the most recently generated zip to this thread")
+async def last_output(interaction: discord.Interaction):
+    if not is_thread(interaction):
+        await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
+        return
+
+    log.info(f"/last_output invoked by {interaction.user} in #{interaction.channel.name}")
+
+    all_zips = [
+        p
+        for version_dir in VERSIONS_DIR.iterdir()
+        if version_dir.is_dir()
+        for output_dir in [(version_dir / "output")]
+        if output_dir.exists()
+        for p in output_dir.glob("AP_*.zip")
+    ]
+
+    if not all_zips:
+        await interaction.response.send_message("⚠️ No generated zips found.", ephemeral=True)
+        return
+
+    latest = max(all_zips, key=lambda p: p.stat().st_mtime)
+    log.info(f"Attaching {latest.name} ({latest.stat().st_size / 1024 / 1024:.1f} MB)")
+
+    await interaction.response.send_message(f"📦 Attaching `{latest.name}`…")
+    try:
+        await interaction.channel.send(file=discord.File(latest))
+    except discord.HTTPException as e:
+        size_mb = latest.stat().st_size / 1024 / 1024
+        if e.status == 413:
+            await interaction.channel.send(
+                f"⚠️ Zip is too large to attach ({size_mb:.1f} MB). "
+                f"You can find it at `{latest}` on the host."
+            )
+        else:
+            await interaction.channel.send(f"⚠️ Failed to attach zip: `{e}`")
+
+
+@tree.command(name="validate", description="Validate all YAML files in this thread against archipelago.gg")
+async def validate(interaction: discord.Interaction):
+    if not is_thread(interaction):
+        await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
+        return
+
+    log.info(f"/validate invoked by {interaction.user} in #{interaction.channel.name}")
+    await interaction.response.send_message("🔍 Scanning thread for YAML files…")
+    thread = interaction.channel
+
+    yaml_files: dict[str, bytes] = {}
+    async for message in thread.history(limit=500, oldest_first=True):
+        for attachment in message.attachments:
+            if attachment.filename.lower().endswith((".yaml", ".yml")):
+                yaml_files[attachment.filename] = normalise_yaml_bytes(await attachment.read())
+
+    if not yaml_files:
+        await thread.send("⚠️ No YAML files found in this thread.")
+        return
+
+    await thread.send(f"🔎 Validating **{len(yaml_files)}** yaml(s) against archipelago.gg…")
+    log.info(f"Validating {len(yaml_files)} yaml(s): {list(yaml_files)}")
+
+    loop = asyncio.get_running_loop()
+    try:
+        results = await loop.run_in_executor(None, check_yamls_on_server, yaml_files)
+    except Exception as e:
+        await thread.send(f"⚠️ Could not reach archipelago.gg/check: `{e}`")
+        return
+
+    if not results:
+        await thread.send("⚠️ No results returned — the server may have rejected the upload.")
+        return
+
+    failures = {f: html.unescape(r) for f, r in results.items() if r != "Valid"}
+    all_valid = not failures
+
+    if all_valid:
+        await thread.send(f"✅ All {len(results)} yaml(s) are valid!")
+    else:
+        lines = [f"❌ `{f}`: {r}" for f, r in failures.items()]
+        await thread.send("**Validation results:**\n" + "\n".join(lines))
+    log.info(f"Validation complete — {sum(1 for r in results.values() if r == 'Valid')}/{len(results)} valid.")
 
 
 @tree.command(name="generate", description="Generate and host an Archipelago multiworld from this thread's files")
@@ -358,6 +524,8 @@ async def status(interaction: discord.Interaction):
     race="Enable race mode (default: false)",
     password="Server join password, only visible to you (optional)",
     server_password="Admin password, overrides default, only visible to you (optional)",
+    version="Archipelago version to generate with (default: latest)",
+    dry_run="Generate locally but skip uploading to archipelago.gg (default: false)",
 )
 @app_commands.choices(
     release=[app_commands.Choice(name=m, value=m) for m in VALID_RELEASE_COLLECT_MODES],
@@ -365,6 +533,7 @@ async def status(interaction: discord.Interaction):
     remaining=[app_commands.Choice(name=m, value=m) for m in VALID_REMAINING_MODES],
     spoiler=[app_commands.Choice(name=m, value=m) for m in VALID_SPOILER_MODES],
 )
+@app_commands.autocomplete(version=version_autocomplete)
 async def generate(
     interaction: discord.Interaction,
     release: app_commands.Choice[str] = None,
@@ -374,25 +543,44 @@ async def generate(
     race: bool = False,
     password: str = None,
     server_password: str = None,
+    version: str = None,
+    dry_run: bool = False,
 ):
     if not is_thread(interaction):
         await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
         return
 
-    await interaction.response.send_message("⏳ Starting generation…", ephemeral=True)
+    log.info(f"/generate invoked by {interaction.user} in #{interaction.channel.name} (version={version or 'latest'}, dry_run={dry_run})")
+    versions = get_installed_versions()
+    if not versions:
+        await interaction.response.send_message("⚠️ No Archipelago versions are installed yet. Please wait for the version manager to finish.", ephemeral=True)
+        return
+
+    version     = version or versions[0]
+    version_dir = get_version_dir(version)
+    if not version_dir.exists():
+        await interaction.response.send_message(f"⚠️ Version `{version}` is not installed.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"⏳ Starting generation with Archipelago `{version}`…", ephemeral=True)
     thread = interaction.channel
     await thread.send("🔍 Scanning thread history for files...")
 
-    if PLAYERS_DIR.exists():
-        for f in PLAYERS_DIR.glob("*.yaml"):
+    players_dir = version_dir / "Players"
+    worlds_dir  = version_dir / "custom_worlds"
+    output_dir  = version_dir / "output"
+
+    if players_dir.exists():
+        for f in players_dir.glob("*.yaml"):
             f.unlink(missing_ok=True)
-        for f in PLAYERS_DIR.glob("*.yml"):
+        for f in players_dir.glob("*.yml"):
             f.unlink(missing_ok=True)
-    if WORLDS_DIR.exists():
-        for f in WORLDS_DIR.glob("*.apworld"):
+    if worlds_dir.exists():
+        for f in worlds_dir.glob("*.apworld"):
             f.unlink(missing_ok=True)
 
-    yaml_files, apworld_files, yaml_uploaders = await collect_files_from_thread(thread)
+    yaml_files, apworld_files, yaml_uploaders = await collect_files_from_thread(thread, version_dir)
+    log.info(f"Collected {len(yaml_files)} yaml(s) and {len(apworld_files)} apworld(s) from thread.")
     if not yaml_files:
         await thread.send("⚠️ No YAML files found in this thread — nothing to generate.")
         return
@@ -407,9 +595,9 @@ async def generate(
     if race:      gen_opts["race"]           = 1
     if password:  gen_opts["password"]       = password
 
-    before = zip_snapshot()
+    before = zip_snapshot(output_dir)
     loop   = asyncio.get_running_loop()
-    success, error = await loop.run_in_executor(None, run_generation, gen_opts)
+    success, error = await loop.run_in_executor(None, run_generation, gen_opts, version_dir)
 
     if not success:
         if isinstance(error, tuple):
@@ -420,9 +608,13 @@ async def generate(
             await thread.send(f"❌ Generation failed:\n```\n{error}\n```")
         return
 
-    new_zips = sorted(zip_snapshot() - before, key=lambda p: p.stat().st_mtime, reverse=True)
+    new_zips = sorted(zip_snapshot(output_dir) - before, key=lambda p: p.stat().st_mtime, reverse=True)
     if not new_zips:
         await thread.send("✅ Generator finished, but no new zip found in output/. Check the logs.")
+        return
+
+    if dry_run:
+        await thread.send("✅ Dry run complete!")
         return
 
     await thread.send("✅ Generation complete! Uploading to archipelago.gg…")
@@ -440,7 +632,9 @@ async def generate(
 @client.event
 async def on_ready():
     await tree.sync()
-    print(f"Logged in as {client.user} — slash commands synced.")
+    versions = get_installed_versions()
+    log.info(f"Logged in as {client.user} — slash commands synced.")
+    log.info(f"Installed Archipelago versions: {versions if versions else 'none yet'}")
 
 
-client.run(BOT_TOKEN)
+client.run(BOT_TOKEN, log_handler=None)
