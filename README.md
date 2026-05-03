@@ -96,9 +96,9 @@ Archipelago versions and any ROM files are preserved across updates.
 | `release` | `disabled`, `enabled`, `auto`, `auto-enabled`, `goal` | `auto` |
 | `collect` | `disabled`, `enabled`, `auto`, `auto-enabled`, `goal` | `auto` |
 | `remaining` | `disabled`, `enabled`, `goal` | `goal` |
-| `spoiler` | `0` (none), `1` (basic), `2` (playthrough), `3` (full) | `3` |
-| `race` | `true` / `false` | `false` |
+| `spoiler` | `none`, `basic`, `playthrough`, `full` | `full` |
+| `race` | `enabled` | *(off)* |
 | `password` | Any string — only visible to you | *(none)* |
 | `server_password` | Overrides the default admin password — only visible to you | *(none)* |
 | `version` | Installed Archipelago version to use | latest |
-| `dry_run` | Generate locally without uploading to archipelago.gg | `false` |
+| `dry_run` | `enabled` | *(off)* |

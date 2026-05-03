@@ -27,7 +27,7 @@ GITHUB_RELEASE_RE = re.compile(
 
 VALID_RELEASE_COLLECT_MODES = ["disabled", "enabled", "auto", "auto-enabled", "goal"]
 VALID_REMAINING_MODES       = ["disabled", "enabled", "goal"]
-VALID_SPOILER_MODES         = ["0", "1", "2", "3"]
+SPOILER_MODES               = {"none": 0, "basic": 1, "playthrough": 2, "full": 3}
 
 NUMBERED_LINE_PREFIXES = tuple(f"{i}." for i in range(1, 20))
 UTF8_BOM               = b'\xef\xbb\xbf'
@@ -520,18 +520,20 @@ async def validate(interaction: discord.Interaction):
     release="When players can release remaining items from their world (default: auto)",
     collect="When players can collect remaining items into their world (default: auto)",
     remaining="When players can query remaining items via !remaining (default: goal)",
-    spoiler="Spoiler log detail level: 0=none 1=basic 2=playthrough 3=full (default: 3)",
-    race="Enable race mode (default: false)",
+    spoiler="Spoiler log detail level (default: full)",
+    race="Enable race mode",
     password="Server join password, only visible to you (optional)",
     server_password="Admin password, overrides default, only visible to you (optional)",
     version="Archipelago version to generate with (default: latest)",
-    dry_run="Generate locally but skip uploading to archipelago.gg (default: false)",
+    dry_run="Generate locally without uploading to archipelago.gg",
 )
 @app_commands.choices(
     release=[app_commands.Choice(name=m, value=m) for m in VALID_RELEASE_COLLECT_MODES],
     collect=[app_commands.Choice(name=m, value=m) for m in VALID_RELEASE_COLLECT_MODES],
     remaining=[app_commands.Choice(name=m, value=m) for m in VALID_REMAINING_MODES],
-    spoiler=[app_commands.Choice(name=m, value=m) for m in VALID_SPOILER_MODES],
+    spoiler=[app_commands.Choice(name=name, value=str(val)) for name, val in SPOILER_MODES.items()],
+    race=[app_commands.Choice(name="enabled", value="enabled")],
+    dry_run=[app_commands.Choice(name="enabled", value="enabled")],
 )
 @app_commands.autocomplete(version=version_autocomplete)
 async def generate(
@@ -540,11 +542,11 @@ async def generate(
     collect: app_commands.Choice[str] = None,
     remaining: app_commands.Choice[str] = None,
     spoiler: app_commands.Choice[str] = None,
-    race: bool = False,
+    race: str = None,
     password: str = None,
     server_password: str = None,
     version: str = None,
-    dry_run: bool = False,
+    dry_run: str = None,
 ):
     if not is_thread(interaction):
         await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
