@@ -7,3 +7,6 @@ WORKDIR /bot
 RUN pip install --quiet discord.py requests pyyaml
 
 COPY archipelago_bot.py version_manager.py ./
+
+RUN useradd -m -u 1000 botuser
+USER botuser

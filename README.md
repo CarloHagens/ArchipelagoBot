@@ -36,6 +36,12 @@ Create two folders on your host machine before starting the containers — Docke
 /your/roms/path/          ← ROM files (optional, only needed for certain games)
 ```
 
+The bot runs as uid 1000 inside the container. The archipelago folder must be owned by that user:
+
+```bash
+chown -R 1000:1000 /your/archipelago/path/
+```
+
 ### 4. Deploy with Docker
 
 Build and push the image from your build machine:
@@ -86,7 +92,7 @@ Archipelago versions and any ROM files are preserved across updates.
 |---|---|
 | `/generate` | Collect files from the thread, generate the multiworld, and post the room link |
 | `/status` | List the yaml and apworld files found in the current thread |
-| `/last_output` | Attach the most recently generated zip to the thread |
+| `/output` | Browse past generation runs and attach a seed to the thread |
 | `/validate` | Validate all YAML files in the thread against archipelago.gg |
 
 `/generate` has optional parameters:
@@ -102,3 +108,4 @@ Archipelago versions and any ROM files are preserved across updates.
 | `server_password` | Overrides the default admin password — only visible to you | *(none)* |
 | `version` | Installed Archipelago version to use | latest |
 | `dry_run` | `enabled` | *(off)* |
+| `count` | `1`–`20` | `1` |

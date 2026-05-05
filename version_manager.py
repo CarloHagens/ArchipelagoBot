@@ -1,4 +1,5 @@
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -65,10 +66,32 @@ def symlink_roms(version_dir: Path) -> None:
 
 # ── Cloning ───────────────────────────────────────────────────────────────────
 
+def install_requirements(tag: str, version_dir: Path) -> None:
+    """Install core requirements for a version into its isolated pyenv directory."""
+    marker = version_dir / ".requirements_installed"
+    if marker.exists():
+        return
+
+    log.info(f"Installing requirements for {tag}...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--quiet",
+         "-r", str(version_dir / "requirements.txt")],
+        capture_output=True,
+        env={**os.environ, "PYTHONUSERBASE": f"/archipelago/pyenv/{tag}", "PIP_USER": "1"},
+    )
+    if result.returncode == 0:
+        marker.touch()
+        log.info(f"Requirements installed successfully for {tag}.")
+    else:
+        log.error(f"pip install failed for {tag}: {result.stderr.decode()}")
+        log.warning(f"Requirements failed to install for {tag} — will retry next check.")
+
+
 def clone_version(tag: str) -> bool:
     version_dir = VERSIONS_DIR / tag
     if (version_dir / "Generate.py").exists():
         symlink_roms(version_dir)  # pick up any newly added ROMs
+        install_requirements(tag, version_dir)  # no-op if marker present
         return False  # already installed
 
     log.info(f"Cloning Archipelago {tag}...")
@@ -84,13 +107,7 @@ def clone_version(tag: str) -> bool:
         shutil.rmtree(version_dir, ignore_errors=True)
         return False
 
-    log.info(f"Installing requirements for {tag}...")
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--quiet",
-         "-r", str(version_dir / "requirements.txt")],
-        capture_output=True,
-    )
-
+    install_requirements(tag, version_dir)
     symlink_roms(version_dir)
     log.info(f"Archipelago {tag} ready.")
     return True

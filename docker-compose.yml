@@ -10,6 +10,15 @@ services:
     environment:
       - BOT_TOKEN={BOT_TOKEN}
       - SERVER_PASSWORD={SERVER_PASSWORD}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '4'
 
   archipelago-versions:
     image: {username}/archipelago-bot:latest
@@ -19,3 +28,12 @@ services:
     volumes:
       - /path/to/archipelago:/archipelago
       - /path/to/roms:/roms:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2'
