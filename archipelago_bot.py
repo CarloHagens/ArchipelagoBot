@@ -1,5 +1,6 @@
 import asyncio
 import html
+import io
 import json
 import logging
 import os
@@ -39,8 +40,10 @@ MAX_SEEDS_PER_RUN        = 20
 MAX_YAML_FILES           = 200
 MAX_APWORLD_FILES        = 200
 MAX_YAML_BYTES           = 1 * 1024 * 1024    # 1 MB per yaml
-MAX_APWORLD_BYTES        = 10 * 1024 * 1024   # 10 MB per apworld
+MAX_APWORLD_BYTES        = 30 * 1024 * 1024   # 30 MB per apworld
+MAX_ZIP_BYTES            = 100 * 1024 * 1024  # 100 MB zip containing an apworld
 MAX_GENERATION_MEMORY    = 3 * 1024 * 1024 * 1024  # 3 GB across all active commands
+MSG_MEMORY_FULL          = f"⚠️ The bot is currently holding too much data in memory ({MAX_GENERATION_MEMORY // 1024 // 1024 // 1024} GB limit). Please try again shortly."
 RUNS_FILE                = Path("/archipelago/runs.json")
 MAX_RUNS                 = 50
 
@@ -132,14 +135,36 @@ def download_apworld_from_github(owner: str, repo: str, tag: str) -> tuple[str, 
     resp = requests.get(api_url, timeout=30, headers={"Accept": "application/vnd.github+json"})
     resp.raise_for_status()
 
-    apworld_assets = [a for a in resp.json().get("assets", []) if a["name"].endswith(".apworld")]
-    if not apworld_assets:
-        raise RuntimeError(f"No .apworld asset found in {owner}/{repo} release {tag}")
+    assets = resp.json().get("assets", [])
 
-    asset = apworld_assets[0]
-    download = requests.get(asset["browser_download_url"], timeout=120)
-    download.raise_for_status()
-    return asset["name"], download.content
+    apworld_assets = [a for a in assets if a["name"].endswith(".apworld")]
+    if apworld_assets:
+        asset = apworld_assets[0]
+        download = requests.get(asset["browser_download_url"], timeout=120)
+        download.raise_for_status()
+        return safe_filename(asset["name"]), download.content
+
+    zip_assets = [a for a in assets if a["name"].endswith(".zip")]
+    for zip_asset in zip_assets:
+        if zip_asset["size"] > MAX_ZIP_BYTES:
+            raise RuntimeError(
+                f"Zip asset `{zip_asset['name']}` is too large ({zip_asset['size'] // 1024 // 1024} MB). "
+                f"Max is {MAX_ZIP_BYTES // 1024 // 1024} MB."
+            )
+        download = requests.get(zip_asset["browser_download_url"], timeout=120)
+        download.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(download.content)) as zf:
+            apworld_names = [n for n in zf.namelist() if n.endswith(".apworld")]
+            if apworld_names:
+                data = zf.read(apworld_names[0])
+                if len(data) > MAX_APWORLD_BYTES:
+                    raise RuntimeError(
+                        f".apworld inside zip is too large ({len(data) // 1024 // 1024} MB). "
+                        f"Max is {MAX_APWORLD_BYTES // 1024 // 1024} MB."
+                    )
+                return safe_filename(apworld_names[0]), data
+
+    raise RuntimeError(f"No .apworld asset (or zip containing one) found in {owner}/{repo} release {tag}")
 
 
 # ── Thread file collection ────────────────────────────────────────────────────
@@ -191,14 +216,14 @@ async def collect_files_from_thread(thread) -> tuple[dict[str, bytes], dict[str,
     seen_repos: dict               = {}
     reserved: int                  = 0
 
-    def abort(release: bool = True) -> tuple:
-        """Release reserved memory and return empty dicts."""
+    def abort() -> tuple:
         global _memory_in_use
-        if release:
-            _memory_in_use -= reserved
+        _memory_in_use -= reserved
         return {}, {}, {}, 0, True
 
     async for message in thread.history(limit=500, oldest_first=True):
+        if message.author == client.user:
+            continue
         for attachment in message.attachments:
             name = attachment.filename.lower()
             if name.endswith(".yaml") or name.endswith(".yml"):
@@ -209,7 +234,7 @@ async def collect_files_from_thread(thread) -> tuple[dict[str, bytes], dict[str,
                     await thread.send(f"⚠️ `{attachment.filename}` is too large ({attachment.size // 1024} KB). Max YAML size is {MAX_YAML_BYTES // 1024} KB.")
                     return abort()
                 if _memory_in_use + attachment.size > MAX_GENERATION_MEMORY:
-                    await thread.send(f"⚠️ The bot is currently holding too much data in memory ({MAX_GENERATION_MEMORY // 1024 // 1024 // 1024} GB limit). Please try again shortly.")
+                    await thread.send(MSG_MEMORY_FULL)
                     return abort()
                 # Reserve memory atomically before downloading (no await between check and increment)
                 _memory_in_use += attachment.size
@@ -226,7 +251,7 @@ async def collect_files_from_thread(thread) -> tuple[dict[str, bytes], dict[str,
                     await thread.send(f"⚠️ `{attachment.filename}` is too large ({attachment.size // 1024 // 1024} MB). Max apworld size is {MAX_APWORLD_BYTES // 1024 // 1024} MB.")
                     return abort()
                 if _memory_in_use + attachment.size > MAX_GENERATION_MEMORY:
-                    await thread.send(f"⚠️ The bot is currently holding too much data in memory ({MAX_GENERATION_MEMORY // 1024 // 1024 // 1024} GB limit). Please try again shortly.")
+                    await thread.send(MSG_MEMORY_FULL)
                     return abort()
                 stem = apworld_stem(attachment.filename)
                 if stem in seen_apworld_stems:
@@ -246,7 +271,7 @@ async def collect_files_from_thread(thread) -> tuple[dict[str, bytes], dict[str,
                 filename, data = result
                 file_size = len(data)
                 if _memory_in_use + file_size > MAX_GENERATION_MEMORY:
-                    await thread.send(f"⚠️ The bot is currently holding too much data in memory ({MAX_GENERATION_MEMORY // 1024 // 1024 // 1024} GB limit). Please try again shortly.")
+                    await thread.send(MSG_MEMORY_FULL)
                     return abort()
                 _memory_in_use += file_size
                 reserved       += file_size
@@ -760,15 +785,18 @@ async def status(interaction: discord.Interaction):
         return
 
     await interaction.response.send_message("🔍 Scanning thread history for files...")
-    yaml_data, apworld_data, _ = await collect_files_from_thread(interaction.channel)
-
-    yaml_list    = ", ".join(f"`{f}`" for f in yaml_data) or "none"
-    apworld_list = ", ".join(f"`{f}`" for f in apworld_data) or "none"
-    await interaction.channel.send(
-        f"**Files found in this thread:**\n"
-        f"📄 **YAMLs ({len(yaml_data)}):** {yaml_list}\n"
-        f"🌍 **APworlds ({len(apworld_data)}):** {apworld_list}"
-    )
+    yaml_data, apworld_data, _, reserved_bytes, _err = await collect_files_from_thread(interaction.channel)
+    try:
+        yaml_list    = ", ".join(f"`{f}`" for f in yaml_data) or "none"
+        apworld_list = ", ".join(f"`{f}`" for f in apworld_data) or "none"
+        await interaction.channel.send(
+            f"**Files found in this thread:**\n"
+            f"📄 **YAMLs ({len(yaml_data)}):** {yaml_list}\n"
+            f"🌍 **APworlds ({len(apworld_data)}):** {apworld_list}"
+        )
+    finally:
+        global _memory_in_use
+        _memory_in_use -= reserved_bytes
 
 
 @tree.command(name="output", description="Attach a previously generated seed to this thread")
@@ -812,39 +840,38 @@ async def validate(interaction: discord.Interaction):
     await interaction.response.send_message("🔍 Scanning thread for YAML files…")
     thread = interaction.channel
 
-    yaml_files: dict[str, bytes] = {}
-    async for message in thread.history(limit=500, oldest_first=True):
-        for attachment in message.attachments:
-            if attachment.filename.lower().endswith((".yaml", ".yml")):
-                yaml_files[attachment.filename] = normalise_yaml_bytes(await attachment.read())
-
-    if not yaml_files:
-        await thread.send("⚠️ No YAML files found in this thread.")
-        return
-
-    await thread.send(f"🔎 Validating **{len(yaml_files)}** yaml(s) against archipelago.gg…")
-    log.info(f"Validating {len(yaml_files)} yaml(s): {list(yaml_files)}")
-
-    loop = asyncio.get_running_loop()
+    yaml_files, _, _uploaders, reserved_bytes, _err = await collect_files_from_thread(thread)
     try:
-        results = await loop.run_in_executor(None, check_yamls_on_server, yaml_files)
-    except Exception as e:
-        await thread.send(f"⚠️ Could not reach archipelago.gg/check: `{e}`")
-        return
+        if not yaml_files:
+            await thread.send("⚠️ No YAML files found in this thread.")
+            return
 
-    if not results:
-        await thread.send("⚠️ No results returned — the server may have rejected the upload.")
-        return
+        await thread.send(f"🔎 Validating **{len(yaml_files)}** yaml(s) against archipelago.gg…")
+        log.info(f"Validating {len(yaml_files)} yaml(s): {list(yaml_files)}")
 
-    failures = {f: html.unescape(r) for f, r in results.items() if r != "Valid"}
-    all_valid = not failures
+        loop = asyncio.get_running_loop()
+        try:
+            results = await loop.run_in_executor(None, check_yamls_on_server, yaml_files)
+        except Exception as e:
+            await thread.send(f"⚠️ Could not reach archipelago.gg/check: `{e}`")
+            return
 
-    if all_valid:
-        await thread.send(f"✅ All {len(results)} yaml(s) are valid!")
-    else:
-        lines = [f"❌ `{f}`: {r}" for f, r in failures.items()]
-        await thread.send("**Validation results:**\n" + "\n".join(lines))
-    log.info(f"Validation complete — {sum(1 for r in results.values() if r == 'Valid')}/{len(results)} valid.")
+        if not results:
+            await thread.send("⚠️ No results returned — the server may have rejected the upload.")
+            return
+
+        failures = {f: html.unescape(r) for f, r in results.items() if r != "Valid"}
+        all_valid = not failures
+
+        if all_valid:
+            await thread.send(f"✅ All {len(results)} yaml(s) are valid!")
+        else:
+            lines = [f"❌ `{f}`: {r}" for f, r in failures.items()]
+            await thread.send("**Validation results:**\n" + "\n".join(lines))
+        log.info(f"Validation complete — {sum(1 for r in results.values() if r == 'Valid')}/{len(results)} valid.")
+    finally:
+        global _memory_in_use
+        _memory_in_use -= reserved_bytes
 
 
 @tree.command(name="generate", description="Generate and host an Archipelago multiworld from this thread's files")
