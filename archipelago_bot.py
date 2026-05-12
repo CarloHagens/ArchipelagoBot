@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass, field
+import functools
 import html
 import io
 import json
@@ -69,7 +70,6 @@ _generation_sem: asyncio.Semaphore | None = None
 _memory_in_use: int = 0
 _monitors: dict = {}    # thread_id_str → {"known_issue_keys": [...]}
 _scheduled: list = []   # list of scheduled job dicts
-_builtin_games_cache: dict[str, set] = {}
 _checker_task: asyncio.Task | None = None
 
 
@@ -832,14 +832,12 @@ def check_yamls_on_server(yaml_files: dict[str, bytes]) -> dict[str, str]:
 
 # ── Thread audit ─────────────────────────────────────────────────────────────
 
-def get_builtin_game_names(version_dir: Path) -> set[str]:
+@functools.cache
+def get_builtin_game_names(version_dir: Path) -> frozenset[str]:
     """Return game names baked into this Archipelago release.
     Searches all .py files one level deep in worlds/ since some worlds
     define their game name outside of __init__.py.
-    Results are cached — a version's worlds never change once installed."""
-    key = str(version_dir)
-    if key in _builtin_games_cache:
-        return _builtin_games_cache[key]
+    Cached — a version's worlds never change once installed."""
     games: set[str] = set()
     worlds_dir = version_dir / "worlds"
     if worlds_dir.exists():
@@ -852,8 +850,7 @@ def get_builtin_game_names(version_dir: Path) -> set[str]:
                     games.add(match.group(1))
             except Exception:
                 pass
-    _builtin_games_cache[key] = games
-    return games
+    return frozenset(games)
 
 
 def get_yaml_game(yaml_bytes: bytes) -> str | None:
@@ -988,7 +985,8 @@ async def audit_thread(thread) -> ScanResult:
     # Check requires.version: find the highest minimum AP version across YAMLs and apworld manifests
     min_ap_ver = get_min_ap_version(result.yaml_data, apworld_infos=apworld_infos)
     if min_ap_ver:
-        satisfying = [v for v in versions if parse_version(v) >= parse_version(min_ap_ver)]
+        min_ap_parsed = parse_version(min_ap_ver)
+        satisfying = [v for v in versions if parse_version(v) >= min_ap_parsed]
         if not satisfying:
             latest = versions[0] if versions else "none"
             result.issues.append((
@@ -997,12 +995,14 @@ async def audit_thread(thread) -> ScanResult:
                 f"but the latest installed version is `{latest}`.",
             ))
 
+    # Pre-normalise apworld stems once — reused for both yaml-matching and version checks below
+    apworld_stems_norm = {_norm(apworld_stem(name)): name for name in result.apworld_data}
+
     # Check for apworlds with no matching yaml (runs even when yaml_data is empty)
     yaml_games_normalised = {_norm(get_yaml_game(data) or "") for data in result.yaml_data.values()}
-    for apworld_name in result.apworld_data:
-        stem_norm = _norm(apworld_stem(apworld_name))
-        has_yaml  = any(
-            stem_norm in game_norm or game_norm in stem_norm
+    for norm_stem, apworld_name in apworld_stems_norm.items():
+        has_yaml = any(
+            norm_stem in game_norm or game_norm in norm_stem
             for game_norm in yaml_games_normalised
             if game_norm
         )
@@ -1016,15 +1016,14 @@ async def audit_thread(thread) -> ScanResult:
 
     if result.yaml_data:
         yamls_to_validate = {}
-        apworld_stems = {apworld_stem(name) for name in result.apworld_data}
         for name, data in result.yaml_data.items():
             game = get_yaml_game(data)
             if builtin_games and game not in builtin_games:
                 # Custom game — check an apworld was provided
                 norm_game   = _norm(game or "")
                 has_apworld = any(
-                    _norm(stem) in norm_game or norm_game in _norm(stem)
-                    for stem in apworld_stems
+                    ns in norm_game or norm_game in ns
+                    for ns in apworld_stems_norm
                 )
                 if not has_apworld:
                     uploader = result.yaml_uploaders.get(name)
@@ -1037,7 +1036,6 @@ async def audit_thread(thread) -> ScanResult:
                 yamls_to_validate[name] = data
 
         # Check requires.game: verify the custom apworld version meets each YAML's minimum
-        apworld_stems_norm = {_norm(apworld_stem(name)): name for name in result.apworld_data}
         for yaml_name, yaml_bytes in result.yaml_data.items():
             _, game_reqs = get_yaml_requires(yaml_bytes)
             for req_game, req_ver in game_reqs.items():
@@ -1098,6 +1096,13 @@ def format_resolved(content: str) -> str:
 
 def is_monitored(channel) -> bool:
     return isinstance(channel, discord.Thread) and str(channel.id) in _monitors
+
+
+def load_monitors() -> dict:
+    try:
+        return json.loads(MONITORS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def save_monitors() -> None:
@@ -1486,7 +1491,8 @@ async def version_autocomplete(interaction: discord.Interaction, current: str):
         try:
             min_ap_ver = await _get_thread_min_ap_version(interaction.channel)
             if min_ap_ver:
-                versions = [v for v in versions if parse_version(v) >= parse_version(min_ap_ver)]
+                min_ap_parsed = parse_version(min_ap_ver)
+                versions = [v for v in versions if parse_version(v) >= min_ap_parsed]
         except Exception:
             pass  # fall back to showing all versions
     return [
@@ -1911,17 +1917,17 @@ async def _schedule_checker_loop() -> None:
 async def on_ready():
     global _checker_task
     await tree.sync()
-    try:
-        _monitors.clear()
-        _monitors.update(json.loads(MONITORS_FILE.read_text(encoding="utf-8")))
-    except Exception:
-        pass
+    _monitors.clear()
+    _monitors.update(load_monitors())
     _scheduled[:] = load_scheduled()
     versions = get_installed_versions()
     log.info(f"Logged in as {client.user} — slash commands synced.")
     log.info(f"Installed Archipelago versions: {versions if versions else 'none yet'}")
     log.info(f"Monitoring {len(_monitors)} thread(s). {len(_scheduled)} generation(s) scheduled.")
     log.info(f"Server timezone: {TIMEZONE}")
+    # Cancel any previous loop (on_ready fires again on every Discord reconnect)
+    if _checker_task and not _checker_task.done():
+        _checker_task.cancel()
     _checker_task = asyncio.create_task(_schedule_checker_loop())
 
 
