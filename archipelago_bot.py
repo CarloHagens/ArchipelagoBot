@@ -563,6 +563,44 @@ async def _run_one_generation(
     return returncode, moved
 
 
+def _find_missing_module(log_text: str) -> str | None:
+    """Return the top-level package name from a ModuleNotFoundError in a generation log."""
+    for line in log_text.splitlines():
+        m = re.match(r"ModuleNotFoundError: No module named '([^'.]+)", line.strip())
+        if m:
+            return m.group(1)
+    return None
+
+
+async def _install_missing_module(module_name: str, version_dir: Path) -> bool:
+    """pip install a missing apworld dependency into the version's persistent pyenv.
+    Returns True if installation succeeded."""
+    log.info(f"Installing missing module '{module_name}'...")
+    env = {
+        **{k: v for k, v in os.environ.items() if k not in ("BOT_TOKEN", "SERVER_PASSWORD")},
+        "PYTHONUSERBASE": str(Path("/archipelago/pyenv") / version_dir.name),
+    }
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--quiet", module_name],
+                env=env,
+                capture_output=True,
+                timeout=120,
+            ),
+        )
+        if result.returncode == 0:
+            log.info(f"Installed '{module_name}' successfully.")
+            return True
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        log.warning(f"Failed to install '{module_name}': {stderr}")
+    except Exception as e:
+        log.warning(f"Error installing '{module_name}': {e}")
+    return False
+
+
 async def run_generation(
     opts: dict,
     version_dir: Path,
@@ -603,6 +641,27 @@ async def run_generation(
         stripped = line.strip()
         if stripped.startswith(("ModuleNotFoundError:", "ImportError:")):
             log.warning(f"Apworld import error: {stripped}")
+
+    # Auto-install a missing apworld dependency and retry once
+    missing = _find_missing_module(log_text)
+    if missing and await _install_missing_module(missing, version_dir):
+        log.info("Retrying generation...")
+        originals = await loop.run_in_executor(None, apply_host_yaml_options, opts, host_yaml_path)
+        before_retry_logs = set(logs_dir.glob("Generate_*.txt"))
+        lock_file.touch()
+        try:
+            returncode, new_zips = await _run_one_generation(version_dir, yaml_data, apworld_data)
+        finally:
+            lock_file.unlink(missing_ok=True)
+        await loop.run_in_executor(None, restore_host_yaml, originals, host_yaml_path)
+        if returncode == 0:
+            log.info("Retry succeeded.")
+            return True, "", new_zips
+        after_retry_logs = set(logs_dir.glob("Generate_*.txt"))
+        retry_new_logs = sorted(after_retry_logs - before_retry_logs, key=lambda p: p.stat().st_mtime, reverse=True)
+        if retry_new_logs:
+            log_text = retry_new_logs[0].read_text(encoding="utf-8", errors="replace")
+
     return False, parse_generation_error(log_text), []
 
 
