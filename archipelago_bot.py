@@ -63,13 +63,14 @@ COMMON_TIMEZONES = [
     "Asia/Kolkata", "Asia/Dubai", "Pacific/Auckland",
 ]
 
-_setup_locks: dict[str, asyncio.Lock] = {}
-_monitor_locks: dict[str, asyncio.Lock] = {}
+_locks: dict[str, asyncio.Lock] = {}
 _monitor_pending: set[int] = set()  # thread_ids that need a re-check after the current one finishes
 _generation_sem: asyncio.Semaphore | None = None
 _memory_in_use: int = 0
 _monitors: dict = {}    # thread_id_str → {"known_issue_keys": [...]}
 _scheduled: list = []   # list of scheduled job dicts
+_builtin_games_cache: dict[str, set] = {}
+_checker_task: asyncio.Task | None = None
 
 
 @dataclass
@@ -83,18 +84,18 @@ class ScanResult:
     issues:           list = field(default_factory=list)  # list[tuple[str, str]] — (key, display_msg)
 
 
+def _get_lock(key: str) -> asyncio.Lock:
+    if key not in _locks:
+        _locks[key] = asyncio.Lock()
+    return _locks[key]
+
+
 def get_monitor_lock(thread_id: int) -> asyncio.Lock:
-    key = str(thread_id)
-    if key not in _monitor_locks:
-        _monitor_locks[key] = asyncio.Lock()
-    return _monitor_locks[key]
+    return _get_lock(f"monitor:{thread_id}")
 
 
 def get_setup_lock(version_dir: Path) -> asyncio.Lock:
-    key = str(version_dir)
-    if key not in _setup_locks:
-        _setup_locks[key] = asyncio.Lock()
-    return _setup_locks[key]
+    return _get_lock(f"setup:{version_dir}")
 
 
 def get_generation_sem() -> asyncio.Semaphore:
@@ -155,6 +156,11 @@ def parse_version(v: str) -> tuple[int, ...]:
         return tuple(int(x) for x in str(v).lstrip("v").split("."))
     except Exception:
         return (0,)
+
+
+def _norm(s: str) -> str:
+    """Normalise a string to lowercase alphanumeric for fuzzy game-name matching."""
+    return re.sub(r'[^a-z0-9]', '', s.lower())
 
 
 # ── File helpers ──────────────────────────────────────────────────────────────
@@ -829,20 +835,24 @@ def check_yamls_on_server(yaml_files: dict[str, bytes]) -> dict[str, str]:
 def get_builtin_game_names(version_dir: Path) -> set[str]:
     """Return game names baked into this Archipelago release.
     Searches all .py files one level deep in worlds/ since some worlds
-    define their game name outside of __init__.py."""
+    define their game name outside of __init__.py.
+    Results are cached — a version's worlds never change once installed."""
+    key = str(version_dir)
+    if key in _builtin_games_cache:
+        return _builtin_games_cache[key]
     games: set[str] = set()
     worlds_dir = version_dir / "worlds"
-    if not worlds_dir.exists():
-        return games
-    for py_file in worlds_dir.glob("*/*.py"):
-        try:
-            for match in re.finditer(
-                r'game\s*(?::\s*\w+\s*)?=\s*["\']([^"\']+)["\']',
-                py_file.read_text(encoding="utf-8", errors="replace"),
-            ):
-                games.add(match.group(1))
-        except Exception:
-            pass
+    if worlds_dir.exists():
+        for py_file in worlds_dir.glob("*/*.py"):
+            try:
+                for match in re.finditer(
+                    r'game\s*(?::\s*\w+\s*)?=\s*["\']([^"\']+)["\']',
+                    py_file.read_text(encoding="utf-8", errors="replace"),
+                ):
+                    games.add(match.group(1))
+            except Exception:
+                pass
+    _builtin_games_cache[key] = games
     return games
 
 
@@ -931,8 +941,11 @@ def get_apworld_info(apworld_bytes: bytes) -> dict:
 def get_min_ap_version(
     yaml_data: dict[str, bytes],
     apworld_data: dict[str, bytes] | None = None,
+    apworld_infos: dict[str, dict] | None = None,
 ) -> str | None:
-    """Return the highest minimum AP version required across all YAMLs and apworld manifests."""
+    """Return the highest minimum AP version required across all YAMLs and apworld manifests.
+
+    apworld_infos may be pre-computed to avoid re-reading apworld bytes (e.g. in audit_thread)."""
     max_ver: tuple[int, ...] | None = None
     max_str: str | None = None
 
@@ -948,8 +961,12 @@ def get_min_ap_version(
         ap_ver, _ = get_yaml_requires(data)
         _update(ap_ver)
 
-    for data in (apworld_data or {}).values():
-        _update(get_apworld_info(data).get("minimum_ap_version"))
+    if apworld_infos is not None:
+        for info in apworld_infos.values():
+            _update(info.get("minimum_ap_version"))
+    else:
+        for data in (apworld_data or {}).values():
+            _update(get_apworld_info(data).get("minimum_ap_version"))
 
     return max_str
 
@@ -965,8 +982,11 @@ async def audit_thread(thread) -> ScanResult:
     versions      = get_installed_versions()
     builtin_games = get_builtin_game_names(get_version_dir(versions[0])) if versions else set()
 
+    # Pre-compute apworld metadata once — reused for version checks and min-AP-version
+    apworld_infos = {name: get_apworld_info(data) for name, data in result.apworld_data.items()}
+
     # Check requires.version: find the highest minimum AP version across YAMLs and apworld manifests
-    min_ap_ver = get_min_ap_version(result.yaml_data, result.apworld_data)
+    min_ap_ver = get_min_ap_version(result.yaml_data, apworld_infos=apworld_infos)
     if min_ap_ver:
         satisfying = [v for v in versions if parse_version(v) >= parse_version(min_ap_ver)]
         if not satisfying:
@@ -978,12 +998,9 @@ async def audit_thread(thread) -> ScanResult:
             ))
 
     # Check for apworlds with no matching yaml (runs even when yaml_data is empty)
-    yaml_games_normalised = {
-        re.sub(r'[^a-z0-9]', '', (get_yaml_game(data) or "").lower())
-        for data in result.yaml_data.values()
-    }
+    yaml_games_normalised = {_norm(get_yaml_game(data) or "") for data in result.yaml_data.values()}
     for apworld_name in result.apworld_data:
-        stem_norm = re.sub(r'[^a-z0-9]', '', apworld_stem(apworld_name))
+        stem_norm = _norm(apworld_stem(apworld_name))
         has_yaml  = any(
             stem_norm in game_norm or game_norm in stem_norm
             for game_norm in yaml_games_normalised
@@ -1004,10 +1021,9 @@ async def audit_thread(thread) -> ScanResult:
             game = get_yaml_game(data)
             if builtin_games and game not in builtin_games:
                 # Custom game — check an apworld was provided
-                normalised_game = re.sub(r'[^a-z0-9]', '', (game or "").lower())
+                norm_game   = _norm(game or "")
                 has_apworld = any(
-                    re.sub(r'[^a-z0-9]', '', stem) in normalised_game or
-                    normalised_game in re.sub(r'[^a-z0-9]', '', stem)
+                    _norm(stem) in norm_game or norm_game in _norm(stem)
                     for stem in apworld_stems
                 )
                 if not has_apworld:
@@ -1021,17 +1037,14 @@ async def audit_thread(thread) -> ScanResult:
                 yamls_to_validate[name] = data
 
         # Check requires.game: verify the custom apworld version meets each YAML's minimum
-        apworld_stems_norm = {
-            re.sub(r'[^a-z0-9]', '', apworld_stem(name)): name
-            for name in result.apworld_data
-        }
+        apworld_stems_norm = {_norm(apworld_stem(name)): name for name in result.apworld_data}
         for yaml_name, yaml_bytes in result.yaml_data.items():
             _, game_reqs = get_yaml_requires(yaml_bytes)
             for req_game, req_ver in game_reqs.items():
                 # Skip builtin games — they have no separate apworld to version-check
                 if builtin_games and req_game in builtin_games:
                     continue
-                norm_req = re.sub(r'[^a-z0-9]', '', req_game.lower())
+                norm_req = _norm(req_game)
                 matching_stem = next(
                     (s for s in apworld_stems_norm if s in norm_req or norm_req in s),
                     None,
@@ -1039,7 +1052,7 @@ async def audit_thread(thread) -> ScanResult:
                 if matching_stem is None:
                     continue  # no apworld present — covered by missing_apworld check
                 apworld_name = apworld_stems_norm[matching_stem]
-                info = get_apworld_info(result.apworld_data[apworld_name])
+                info = apworld_infos[apworld_name]
                 if info["world_version"] and req_ver:
                     if parse_version(info["world_version"]) < parse_version(req_ver):
                         uploader = result.yaml_uploaders.get(yaml_name)
@@ -1149,7 +1162,8 @@ async def check_monitored_thread(thread: discord.Thread) -> None:
 
                 entry["known_issue_keys"] = list(current.keys())
                 entry["warning_messages"] = warning_ids
-                save_monitors()
+                if new_keys or resolved_keys:
+                    save_monitors()
             finally:
                 _memory_in_use -= result.reserved_bytes
             if thread.id not in _monitor_pending:
@@ -1175,9 +1189,8 @@ def get_scheduled_job(thread_id: int) -> dict | None:
 
 
 def remove_scheduled_job(thread_id: int) -> bool:
-    global _scheduled
     before = len(_scheduled)
-    _scheduled = [j for j in _scheduled if j["thread_id"] != thread_id]
+    _scheduled[:] = [j for j in _scheduled if j["thread_id"] != thread_id]
     if len(_scheduled) < before:
         save_scheduled()
         return True
@@ -1197,6 +1210,75 @@ def parse_schedule_time(time_str: str, tz_name: str | None = None) -> datetime |
         return dt if dt and dt > datetime.now(timezone.utc) else None
     except Exception:
         return None
+
+
+async def _execute_generation(
+    thread: discord.Thread,
+    opts: dict,
+    version_dir: Path,
+    yaml_data: dict[str, bytes],
+    apworld_data: dict[str, bytes],
+    yaml_uploaders: dict,
+    count: int,
+    dry_run: bool = False,
+) -> None:
+    """Run generation(s), record, and post results to the thread.
+    Enforces requires.version. Memory management is the caller's responsibility."""
+    version = version_dir.name
+    loop    = asyncio.get_running_loop()
+
+    # Enforce requires.version: abort if selected version is older than any YAML or apworld demands
+    min_ap_ver = get_min_ap_version(yaml_data, apworld_data)
+    if min_ap_ver and parse_version(version) < parse_version(min_ap_ver):
+        await thread.send(
+            f"❌ Version `{version}` is too old — your YAMLs require Archipelago "
+            f"`{min_ap_ver}` or newer. Please install a newer version or remove the "
+            f"`requires` field from the relevant YAML(s)."
+        )
+        return
+
+    if count == 1:
+        success, error, new_zips = await run_generation(opts, version_dir, yaml_data, apworld_data)
+        if not success:
+            if isinstance(error, tuple):
+                msg, bad_files = error
+                mentions = " ".join(yaml_uploaders[f].mention for f in bad_files if f in yaml_uploaders)
+                await thread.send(f"❌ Generation failed{' ' + mentions if mentions else ''}:\n```\n{msg}\n```")
+            else:
+                await thread.send(f"❌ Generation failed:\n```\n{error}\n```")
+            return
+        if not new_zips:
+            await thread.send("✅ Generator finished, but no new zip found in output/. Check the logs.")
+            return
+        zips_with_counts = [(p, parse_sphere_count(p)) for p in new_zips]
+        run = record_run(thread.id, thread.name, version, zips_with_counts)
+        if dry_run:
+            await thread.send("✅ Dry run complete!")
+            return
+        unregister_monitor(thread.id)
+        await thread.send("✅ Generation complete! Uploading to archipelago.gg…")
+        try:
+            room_url = await loop.run_in_executor(None, upload_and_create_room, new_zips[0])
+            mark_run_uploaded(run["id"], new_zips[0])
+            await thread.send(f"🎉 Room is ready! <{room_url}>")
+        except Exception as e:
+            await thread.send(f"⚠️ Generation succeeded but upload failed: `{e}`\nThe zip is saved at: `{new_zips[0]}`")
+    else:
+        succeeded, new_zips, errors = await run_generations(count, opts, version_dir, yaml_data, apworld_data)
+        if not new_zips:
+            error_detail = "\n".join(str(e) for e in errors if e) if errors else "Check the logs."
+            await thread.send(f"❌ All {count} generations failed:\n```\n{error_detail}\n```")
+            return
+        zips_with_counts = [(p, parse_sphere_count(p)) for p in new_zips]
+        run = record_run(thread.id, thread.name, version, zips_with_counts)
+        lines = [f"🎲 `{p.name}` — {f'{c} spheres' if c is not None else 'no spoiler'}" for p, c in zips_with_counts]
+        failed_line = f"\n❌ {count - succeeded} seed(s) failed." if succeeded < count else ""
+        await thread.send(f"✅ {succeeded}/{count} seeds generated:\n" + "\n".join(lines) + failed_line)
+        if dry_run:
+            return
+        unregister_monitor(thread.id)
+        view = SeedSelectView(zips_with_counts, thread, run["id"])
+        await thread.send("Pick a seed to upload:", view=view)
 
 
 async def _run_scheduled_generate(thread: discord.Thread, job: dict) -> None:
@@ -1220,56 +1302,16 @@ async def _run_scheduled_generate(thread: discord.Thread, job: dict) -> None:
 
         scan = await collect_files_from_thread(thread)
         reserved_bytes = scan.reserved_bytes
-        yaml_data, apworld_data, yaml_uploaders = scan.yaml_data, scan.apworld_data, scan.yaml_uploaders
 
-        if not yaml_data:
+        if not scan.yaml_data:
             if not scan.had_error:
                 await thread.send("⚠️ Scheduled generation: no YAML files found in this thread.")
             return
 
         seed_label = "seed" if count == 1 else f"{count} seeds"
-        await thread.send(f"⚙️ Found **{len(yaml_data)}** yaml(s) and **{len(apworld_data)}** apworld(s). Generating {seed_label}… this may take a minute.")
+        await thread.send(f"⚙️ Found **{len(scan.yaml_data)}** yaml(s) and **{len(scan.apworld_data)}** apworld(s). Generating {seed_label}… this may take a minute.")
 
-        opts  = job.get("opts", {})
-        loop  = asyncio.get_running_loop()
-
-        if count == 1:
-            success, error, new_zips = await run_generation(opts, version_dir, yaml_data, apworld_data)
-            if not success:
-                if isinstance(error, tuple):
-                    msg, bad_files = error
-                    mentions = " ".join(yaml_uploaders[f].mention for f in bad_files if f in yaml_uploaders)
-                    await thread.send(f"❌ Scheduled generation failed{' ' + mentions if mentions else ''}:\n```\n{msg}\n```")
-                else:
-                    await thread.send(f"❌ Scheduled generation failed:\n```\n{error}\n```")
-                return
-            if not new_zips:
-                await thread.send("✅ Generator finished, but no new zip found in output/. Check the logs.")
-                return
-            zips_with_counts = [(p, parse_sphere_count(p)) for p in new_zips]
-            run = record_run(thread.id, thread.name, version, zips_with_counts)
-            unregister_monitor(thread.id)
-            await thread.send("✅ Scheduled generation complete! Uploading to archipelago.gg…")
-            try:
-                room_url = await loop.run_in_executor(None, upload_and_create_room, new_zips[0])
-                mark_run_uploaded(run["id"], new_zips[0])
-                await thread.send(f"🎉 Room is ready! <{room_url}>")
-            except Exception as e:
-                await thread.send(f"⚠️ Generation succeeded but upload failed: `{e}`\nThe zip is saved at: `{new_zips[0]}`")
-        else:
-            succeeded, new_zips, errors = await run_generations(count, opts, version_dir, yaml_data, apworld_data)
-            if not new_zips:
-                error_detail = "\n".join(str(e) for e in errors if e) if errors else "Check the logs."
-                await thread.send(f"❌ All {count} scheduled generations failed:\n```\n{error_detail}\n```")
-                return
-            zips_with_counts = [(p, parse_sphere_count(p)) for p in new_zips]
-            run = record_run(thread.id, thread.name, version, zips_with_counts)
-            unregister_monitor(thread.id)
-            lines = [f"🎲 `{p.name}` — {f'{c} spheres' if c is not None else 'no spoiler'}" for p, c in zips_with_counts]
-            failed_line = f"\n❌ {count - succeeded} seed(s) failed." if succeeded < count else ""
-            await thread.send(f"✅ {succeeded}/{count} seeds generated:\n" + "\n".join(lines) + failed_line)
-            view = SeedSelectView(zips_with_counts, thread, run["id"])
-            await thread.send("Pick a seed to upload:", view=view)
+        await _execute_generation(thread, job.get("opts", {}), version_dir, scan.yaml_data, scan.apworld_data, scan.yaml_uploaders, count)
 
     except Exception:
         log.exception(f"Error in scheduled generation for thread {thread.id}")
@@ -1283,6 +1325,8 @@ async def _run_scheduled_generate(thread: discord.Thread, job: dict) -> None:
 
 async def check_due_schedules() -> None:
     """Fire any scheduled jobs whose time has passed."""
+    if not _scheduled:
+        return
     now = datetime.now(timezone.utc)
     due = [j for j in _scheduled if datetime.fromisoformat(j["scheduled_utc"]) <= now]
     for job in due:
@@ -1588,12 +1632,9 @@ async def gather(interaction: discord.Interaction):
         # Too large — split into separate players and custom_worlds zips
         await thread.send(f"{summary}\n📦 Combined zip too large — sending as separate files:")
 
-        async def send_or_split(zip_name: str, files: dict[str, bytes], folder: str) -> None:
+        async def send_or_split(zip_name: str, yaml_d: dict[str, bytes], apworld_d: dict[str, bytes]) -> None:
             """Try sending as a zip; if still too large, fall back to individual files."""
-            data = _build_gather_zip(
-                files if folder == "Players" else {},
-                files if folder == "custom_worlds" else {},
-            )
+            data = _build_gather_zip(yaml_d, apworld_d)
             try:
                 await thread.send(file=discord.File(io.BytesIO(data), filename=zip_name))
                 return
@@ -1601,8 +1642,9 @@ async def gather(interaction: discord.Interaction):
                 if e.status != 413:
                     raise
             # Zip still too large — send each file individually
-            await thread.send(f"📦 `{zip_name}` too large — sending {len(files)} file(s) individually:")
-            for fname, fdata in files.items():
+            individual_files = {**yaml_d, **apworld_d}
+            await thread.send(f"📦 `{zip_name}` too large — sending {len(individual_files)} file(s) individually:")
+            for fname, fdata in individual_files.items():
                 try:
                     await thread.send(file=discord.File(io.BytesIO(fdata), filename=fname))
                 except discord.HTTPException as e:
@@ -1612,9 +1654,9 @@ async def gather(interaction: discord.Interaction):
                         raise
 
         if scan.yaml_data:
-            await send_or_split("players.zip", scan.yaml_data, "Players")
+            await send_or_split("players.zip", scan.yaml_data, {})
         if scan.apworld_data:
-            await send_or_split("custom_worlds.zip", scan.apworld_data, "custom_worlds")
+            await send_or_split("custom_worlds.zip", {}, scan.apworld_data)
     finally:
         global _memory_in_use
         _memory_in_use -= scan.reserved_bytes
@@ -1641,7 +1683,7 @@ async def gather(interaction: discord.Interaction):
     collect=[app_commands.Choice(name=m, value=m) for m in VALID_RELEASE_COLLECT_MODES],
     remaining=[app_commands.Choice(name=m, value=m) for m in VALID_REMAINING_MODES],
     spoiler=[app_commands.Choice(name=name, value=str(val)) for name, val in SPOILER_MODES.items()],
-    race=[app_commands.Choice(name="enabled", value="enabled")],
+    race=[app_commands.Choice(name="yes", value="yes")],
 )
 @app_commands.autocomplete(time=time_autocomplete, timezone=timezone_autocomplete, version=version_autocomplete)
 async def schedule(
@@ -1838,16 +1880,6 @@ async def generate(
         seed_label = "seed" if count == 1 else f"{count} seeds"
         await thread.send(f"⚙️ Found **{len(yaml_data)}** yaml(s) and **{len(apworld_data)}** apworld(s). Generating {seed_label}… this may take a minute.")
 
-        # Enforce requires.version: abort if selected version is older than any YAML or apworld demands
-        min_ap_ver = get_min_ap_version(yaml_data, apworld_data)
-        if min_ap_ver and parse_version(version) < parse_version(min_ap_ver):
-            await thread.send(
-                f"❌ Version `{version}` is too old — your YAMLs require Archipelago "
-                f"`{min_ap_ver}` or newer. Please install a newer version or remove the "
-                f"`requires` field from the relevant YAML(s)."
-            )
-            return
-
         gen_opts: dict = {"server_password": server_password or SERVER_PASSWORD}
         if release:   gen_opts["release_mode"]   = release.value
         if collect:   gen_opts["collect_mode"]   = collect.value
@@ -1856,69 +1888,7 @@ async def generate(
         if race:      gen_opts["race"]           = 1
         if password:  gen_opts["password"]       = password
 
-        loop = asyncio.get_running_loop()
-
-        # ── Single seed ───────────────────────────────────────────────────────────
-        if count == 1:
-            success, error, new_zips = await run_generation(gen_opts, version_dir, yaml_data, apworld_data)
-
-            if not success:
-                if isinstance(error, tuple):
-                    msg, bad_files = error
-                    mentions = " ".join(yaml_uploaders[f].mention for f in bad_files if f in yaml_uploaders)
-                    await thread.send(f"❌ Generation failed{' ' + mentions if mentions else ''}:\n```\n{msg}\n```")
-                else:
-                    await thread.send(f"❌ Generation failed:\n```\n{error}\n```")
-                return
-
-            if not new_zips:
-                await thread.send("✅ Generator finished, but no new zip found in output/. Check the logs.")
-                return
-
-            zips_with_counts = [(p, parse_sphere_count(p)) for p in new_zips]
-            run = record_run(thread.id, thread.name, version, zips_with_counts)
-
-            if dry_run:
-                await thread.send("✅ Dry run complete!")
-                return
-
-            unregister_monitor(thread.id)
-            await thread.send("✅ Generation complete! Uploading to archipelago.gg…")
-            try:
-                room_url = await loop.run_in_executor(None, upload_and_create_room, new_zips[0])
-                mark_run_uploaded(run["id"], new_zips[0])
-            except Exception as e:
-                await thread.send(f"⚠️ Generation succeeded but upload failed: `{e}`\nThe zip is saved at: `{new_zips[0]}`")
-                return
-
-            await thread.send(f"🎉 Room is ready! <{room_url}>")
-
-        # ── Multiple seeds ────────────────────────────────────────────────────────
-        else:
-            succeeded, new_zips, errors = await run_generations(count, gen_opts, version_dir, yaml_data, apworld_data)
-
-            if not new_zips:
-                error_detail = "\n".join(str(e) for e in errors if e) if errors else "Check the logs."
-                await thread.send(f"❌ All {count} generations failed:\n```\n{error_detail}\n```")
-                return
-
-            zips_with_counts = [(p, parse_sphere_count(p)) for p in new_zips]
-            run = record_run(thread.id, thread.name, version, zips_with_counts)
-
-            lines = [
-                f"🎲 `{p.name}` — {f'{c} spheres' if c is not None else 'no spoiler'}"
-                for p, c in zips_with_counts
-            ]
-            failed_line = f"\n❌ {count - succeeded} seed(s) failed." if succeeded < count else ""
-            summary = f"✅ {succeeded}/{count} seeds generated:\n" + "\n".join(lines) + failed_line
-            await thread.send(summary)
-
-            if dry_run:
-                return
-
-            unregister_monitor(thread.id)
-            view = SeedSelectView(zips_with_counts, thread, run["id"])
-            await thread.send("Pick a seed to upload:", view=view)
+        await _execute_generation(thread, gen_opts, version_dir, yaml_data, apworld_data, yaml_uploaders, count, dry_run=dry_run == "yes")
 
     finally:
         global _memory_in_use
@@ -1939,22 +1909,20 @@ async def _schedule_checker_loop() -> None:
 
 @client.event
 async def on_ready():
-    global _monitors, _scheduled
+    global _checker_task
     await tree.sync()
     try:
-        _monitors = json.loads(MONITORS_FILE.read_text(encoding="utf-8"))
+        _monitors.clear()
+        _monitors.update(json.loads(MONITORS_FILE.read_text(encoding="utf-8")))
     except Exception:
-        _monitors = {}
-    try:
-        _scheduled = json.loads(SCHEDULED_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        _scheduled = []
+        pass
+    _scheduled[:] = load_scheduled()
     versions = get_installed_versions()
     log.info(f"Logged in as {client.user} — slash commands synced.")
     log.info(f"Installed Archipelago versions: {versions if versions else 'none yet'}")
     log.info(f"Monitoring {len(_monitors)} thread(s). {len(_scheduled)} generation(s) scheduled.")
     log.info(f"Server timezone: {TIMEZONE}")
-    asyncio.create_task(_schedule_checker_loop())
+    _checker_task = asyncio.create_task(_schedule_checker_loop())
 
 
 @client.event
