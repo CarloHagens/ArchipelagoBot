@@ -4,7 +4,7 @@ RUN apt-get update -qq && apt-get install -y -qq git tk && rm -rf /var/lib/apt/l
 
 WORKDIR /bot
 
-RUN pip install --quiet discord.py requests pyyaml
+RUN pip install --quiet discord.py requests pyyaml py_randomprime
 
 COPY archipelago_bot.py version_manager.py ./
 

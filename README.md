@@ -91,9 +91,9 @@ Archipelago versions and any ROM files are preserved across updates.
 | Command | Description |
 |---|---|
 | `/generate` | Collect files from the thread, generate the multiworld, and post the room link |
-| `/status` | List the yaml and apworld files found in the current thread |
+| `/status` | List files found in the thread and validate YAMLs against archipelago.gg |
 | `/output` | Browse past generation runs and attach a seed to the thread |
-| `/validate` | Validate all YAML files in the thread against archipelago.gg |
+| `/monitor` | Start live monitoring of the thread — flags issues as files are posted; run again to stop |
 
 `/generate` has optional parameters:
 
