@@ -749,11 +749,17 @@ def parse_sphere_count(zip_path: Path) -> int | None:
 
 # ── Run history ───────────────────────────────────────────────────────────────
 
-def load_runs() -> list[dict]:
+def _load_json_file(path: Path, default):
+    """Read a JSON file and return its contents, or `default` on any error."""
     try:
-        return json.loads(RUNS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning(f"Could not load {path.name}: {e}")
+        return default
+
+
+def load_runs() -> list[dict]:
+    return _load_json_file(RUNS_FILE, [])
 
 
 def save_runs(runs: list[dict]) -> None:
@@ -832,7 +838,7 @@ def check_yamls_on_server(yaml_files: dict[str, bytes]) -> dict[str, str]:
 
 # ── Thread audit ─────────────────────────────────────────────────────────────
 
-@functools.cache
+@functools.lru_cache(maxsize=8)
 def get_builtin_game_names(version_dir: Path) -> frozenset[str]:
     """Return game names baked into this Archipelago release.
     Searches all .py files one level deep in worlds/ since some worlds
@@ -998,8 +1004,11 @@ async def audit_thread(thread) -> ScanResult:
     # Pre-normalise apworld stems once — reused for both yaml-matching and version checks below
     apworld_stems_norm = {_norm(apworld_stem(name)): name for name in result.apworld_data}
 
+    # Parse each YAML's game name once — reused in both the apworld-matching and validation loops
+    yaml_games_by_name = {name: get_yaml_game(data) for name, data in result.yaml_data.items()}
+
     # Check for apworlds with no matching yaml (runs even when yaml_data is empty)
-    yaml_games_normalised = {_norm(get_yaml_game(data) or "") for data in result.yaml_data.values()}
+    yaml_games_normalised = {_norm(game or "") for game in yaml_games_by_name.values()}
     for norm_stem, apworld_name in apworld_stems_norm.items():
         has_yaml = any(
             norm_stem in game_norm or game_norm in norm_stem
@@ -1017,7 +1026,7 @@ async def audit_thread(thread) -> ScanResult:
     if result.yaml_data:
         yamls_to_validate = {}
         for name, data in result.yaml_data.items():
-            game = get_yaml_game(data)
+            game = yaml_games_by_name[name]
             if builtin_games and game not in builtin_games:
                 # Custom game — check an apworld was provided
                 norm_game   = _norm(game or "")
@@ -1099,10 +1108,7 @@ def is_monitored(channel) -> bool:
 
 
 def load_monitors() -> dict:
-    try:
-        return json.loads(MONITORS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    return _load_json_file(MONITORS_FILE, {})
 
 
 def save_monitors() -> None:
@@ -1179,10 +1185,7 @@ async def check_monitored_thread(thread: discord.Thread) -> None:
 # ── Schedule helpers ─────────────────────────────────────────────────────────
 
 def load_scheduled() -> list:
-    try:
-        return json.loads(SCHEDULED_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    return _load_json_file(SCHEDULED_FILE, [])
 
 
 def save_scheduled() -> None:
@@ -1925,9 +1928,14 @@ async def on_ready():
     log.info(f"Installed Archipelago versions: {versions if versions else 'none yet'}")
     log.info(f"Monitoring {len(_monitors)} thread(s). {len(_scheduled)} generation(s) scheduled.")
     log.info(f"Server timezone: {TIMEZONE}")
-    # Cancel any previous loop (on_ready fires again on every Discord reconnect)
+    # Cancel any previous loop (on_ready fires again on every Discord reconnect).
+    # Await it so the old loop is fully stopped before the new one starts.
     if _checker_task and not _checker_task.done():
         _checker_task.cancel()
+        try:
+            await _checker_task
+        except asyncio.CancelledError:
+            pass
     _checker_task = asyncio.create_task(_schedule_checker_loop())
 
 
