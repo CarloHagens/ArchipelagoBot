@@ -11,9 +11,10 @@ import subprocess
 import sys
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import dateparser
 import discord
 import requests
 import yaml
@@ -47,14 +48,28 @@ MAX_GENERATION_MEMORY    = 3 * 1024 * 1024 * 1024  # 3 GB across all active comm
 MSG_MEMORY_FULL          = f"⚠️ The bot is currently holding too much data in memory ({MAX_GENERATION_MEMORY // 1024 // 1024 // 1024} GB limit). Please try again shortly."
 RUNS_FILE                = Path("/archipelago/runs.json")
 MONITORS_FILE            = Path("/archipelago/monitors.json")
+SCHEDULED_FILE           = Path("/archipelago/scheduled.json")
 MAX_RUNS                 = 50
+TIMEZONE                 = os.environ.get("TIMEZONE", "UTC")
+
+COMMON_TIMEZONES = [
+    "UTC",
+    "Europe/London", "Europe/Amsterdam", "Europe/Paris", "Europe/Berlin",
+    "Europe/Madrid", "Europe/Rome", "Europe/Stockholm", "Europe/Helsinki",
+    "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
+    "America/Toronto", "America/Vancouver", "America/Sao_Paulo",
+    "Australia/Sydney", "Australia/Melbourne", "Australia/Perth",
+    "Asia/Tokyo", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore",
+    "Asia/Kolkata", "Asia/Dubai", "Pacific/Auckland",
+]
 
 _setup_locks: dict[str, asyncio.Lock] = {}
 _monitor_locks: dict[str, asyncio.Lock] = {}
 _monitor_pending: set[int] = set()  # thread_ids that need a re-check after the current one finishes
 _generation_sem: asyncio.Semaphore | None = None
 _memory_in_use: int = 0
-_monitors: dict = {}  # thread_id_str → {"known_issue_keys": [...]}
+_monitors: dict = {}    # thread_id_str → {"known_issue_keys": [...]}
+_scheduled: list = []   # list of scheduled job dicts
 
 
 @dataclass
@@ -1142,6 +1157,157 @@ async def check_monitored_thread(thread: discord.Thread) -> None:
             log.info(f"[monitor #{thread.name}] Re-check was queued during scan — running again.")
 
 
+# ── Schedule helpers ─────────────────────────────────────────────────────────
+
+def load_scheduled() -> list:
+    try:
+        return json.loads(SCHEDULED_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save_scheduled() -> None:
+    SCHEDULED_FILE.write_text(json.dumps(_scheduled, indent=2), encoding="utf-8")
+
+
+def get_scheduled_job(thread_id: int) -> dict | None:
+    return next((j for j in _scheduled if j["thread_id"] == thread_id), None)
+
+
+def remove_scheduled_job(thread_id: int) -> bool:
+    global _scheduled
+    before = len(_scheduled)
+    _scheduled = [j for j in _scheduled if j["thread_id"] != thread_id]
+    if len(_scheduled) < before:
+        save_scheduled()
+        return True
+    return False
+
+
+def parse_schedule_time(time_str: str, tz_name: str | None = None) -> datetime | None:
+    """Parse a natural-language time string and return a UTC-aware datetime, or None if unparseable."""
+    settings = {
+        "TIMEZONE":              tz_name or TIMEZONE,
+        "RETURN_AS_TIMEZONE_AWARE": True,
+        "PREFER_DATES_FROM":    "future",
+        "TO_TIMEZONE":          "UTC",
+    }
+    try:
+        dt = dateparser.parse(time_str, settings=settings)
+        return dt if dt and dt > datetime.now(timezone.utc) else None
+    except Exception:
+        return None
+
+
+async def _run_scheduled_generate(thread: discord.Thread, job: dict) -> None:
+    """Execute a scheduled generation job — mirrors /generate but posts directly to the thread."""
+    global _memory_in_use
+    reserved_bytes = 0
+    try:
+        versions = get_installed_versions()
+        if not versions:
+            await thread.send("⚠️ Scheduled generation failed: no Archipelago versions installed.")
+            return
+
+        version = job.get("version") or versions[0]
+        version_dir = get_version_dir(version)
+        if not version_dir.exists():
+            await thread.send(f"⚠️ Scheduled generation failed: version `{version}` is no longer installed.")
+            return
+
+        count = job.get("count", 1)
+        await thread.send(f"⏰ Running scheduled generation with Archipelago `{version}`…")
+
+        scan = await collect_files_from_thread(thread)
+        reserved_bytes = scan.reserved_bytes
+        yaml_data, apworld_data, yaml_uploaders = scan.yaml_data, scan.apworld_data, scan.yaml_uploaders
+
+        if not yaml_data:
+            if not scan.had_error:
+                await thread.send("⚠️ Scheduled generation: no YAML files found in this thread.")
+            return
+
+        seed_label = "seed" if count == 1 else f"{count} seeds"
+        await thread.send(f"⚙️ Found **{len(yaml_data)}** yaml(s) and **{len(apworld_data)}** apworld(s). Generating {seed_label}… this may take a minute.")
+
+        opts  = job.get("opts", {})
+        loop  = asyncio.get_running_loop()
+
+        if count == 1:
+            success, error, new_zips = await run_generation(opts, version_dir, yaml_data, apworld_data)
+            if not success:
+                if isinstance(error, tuple):
+                    msg, bad_files = error
+                    mentions = " ".join(yaml_uploaders[f].mention for f in bad_files if f in yaml_uploaders)
+                    await thread.send(f"❌ Scheduled generation failed{' ' + mentions if mentions else ''}:\n```\n{msg}\n```")
+                else:
+                    await thread.send(f"❌ Scheduled generation failed:\n```\n{error}\n```")
+                return
+            if not new_zips:
+                await thread.send("✅ Generator finished, but no new zip found in output/. Check the logs.")
+                return
+            zips_with_counts = [(p, parse_sphere_count(p)) for p in new_zips]
+            run = record_run(thread.id, thread.name, version, zips_with_counts)
+            unregister_monitor(thread.id)
+            await thread.send("✅ Scheduled generation complete! Uploading to archipelago.gg…")
+            try:
+                room_url = await loop.run_in_executor(None, upload_and_create_room, new_zips[0])
+                mark_run_uploaded(run["id"], new_zips[0])
+                await thread.send(f"🎉 Room is ready! <{room_url}>")
+            except Exception as e:
+                await thread.send(f"⚠️ Generation succeeded but upload failed: `{e}`\nThe zip is saved at: `{new_zips[0]}`")
+        else:
+            succeeded, new_zips, errors = await run_generations(count, opts, version_dir, yaml_data, apworld_data)
+            if not new_zips:
+                error_detail = "\n".join(str(e) for e in errors if e) if errors else "Check the logs."
+                await thread.send(f"❌ All {count} scheduled generations failed:\n```\n{error_detail}\n```")
+                return
+            zips_with_counts = [(p, parse_sphere_count(p)) for p in new_zips]
+            run = record_run(thread.id, thread.name, version, zips_with_counts)
+            unregister_monitor(thread.id)
+            lines = [f"🎲 `{p.name}` — {f'{c} spheres' if c is not None else 'no spoiler'}" for p, c in zips_with_counts]
+            failed_line = f"\n❌ {count - succeeded} seed(s) failed." if succeeded < count else ""
+            await thread.send(f"✅ {succeeded}/{count} seeds generated:\n" + "\n".join(lines) + failed_line)
+            view = SeedSelectView(zips_with_counts, thread, run["id"])
+            await thread.send("Pick a seed to upload:", view=view)
+
+    except Exception:
+        log.exception(f"Error in scheduled generation for thread {thread.id}")
+        try:
+            await thread.send("⚠️ Scheduled generation encountered an unexpected error. Check the bot logs.")
+        except Exception:
+            pass
+    finally:
+        _memory_in_use -= reserved_bytes
+
+
+async def check_due_schedules() -> None:
+    """Fire any scheduled jobs whose time has passed."""
+    now = datetime.now(timezone.utc)
+    due = [j for j in _scheduled if datetime.fromisoformat(j["scheduled_utc"]) <= now]
+    for job in due:
+        remove_scheduled_job(job["thread_id"])
+        log.info(f"Firing scheduled generation for thread {job['thread_id']} ({job['thread_name']})")
+        try:
+            thread = await client.fetch_channel(job["thread_id"])
+            await _run_scheduled_generate(thread, job)
+        except Exception:
+            log.exception(f"Failed to fire scheduled job for thread {job['thread_id']}")
+
+
+# ── Gather zip builder ───────────────────────────────────────────────────────
+
+def _build_gather_zip(yaml_data: dict[str, bytes], apworld_data: dict[str, bytes]) -> bytes:
+    """Build an in-memory zip with Players/ and custom_worlds/ subdirectories."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in yaml_data.items():
+            zf.writestr(f"Players/{name}", data)
+        for name, data in apworld_data.items():
+            zf.writestr(f"custom_worlds/{name}", data)
+    return buf.getvalue()
+
+
 # ── Room upload ───────────────────────────────────────────────────────────────
 
 def upload_and_create_room(zip_path: Path) -> str:
@@ -1246,6 +1412,28 @@ async def _get_thread_min_ap_version(thread: discord.Thread) -> str | None:
             except Exception:
                 pass
     return get_min_ap_version(yaml_data, apworld_data)
+
+
+async def time_autocomplete(interaction: discord.Interaction, current: str):
+    now = datetime.now(timezone.utc)
+    suggestions = [
+        "in 30 minutes", "in 1 hour", "in 2 hours", "in 4 hours", "in 8 hours",
+        "tomorrow 8pm",
+    ] + [
+        f"{(now + timedelta(days=i)).strftime('%A').lower()} 8pm"
+        for i in range(1, 8)
+    ]
+    # Deduplicate (e.g. if today is Friday, "friday 8pm" might appear twice)
+    seen: set[str] = set()
+    unique = [s for s in suggestions if not (s in seen or seen.add(s))]
+    if current:
+        unique = [s for s in unique if current.lower() in s.lower()]
+    return [app_commands.Choice(name=s, value=s) for s in unique[:25]]
+
+
+async def timezone_autocomplete(interaction: discord.Interaction, current: str):
+    matches = [tz for tz in COMMON_TIMEZONES if current.lower() in tz.lower()] if current else COMMON_TIMEZONES
+    return [app_commands.Choice(name=tz, value=tz) for tz in matches[:25]]
 
 
 async def version_autocomplete(interaction: discord.Interaction, current: str):
@@ -1363,6 +1551,190 @@ async def output(interaction: discord.Interaction, run: str, seed: str):
             await interaction.channel.send(f"⚠️ Failed to attach file: `{e}`")
 
 
+@tree.command(name="gather", description="Collect all YAMLs and apworlds from this thread and attach them as a zip")
+async def gather(interaction: discord.Interaction):
+    if not is_thread(interaction):
+        await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
+        return
+
+    log.info(f"/gather invoked by {interaction.user} in #{interaction.channel.name}")
+    await interaction.response.send_message("📦 Gathering files…")
+    thread = interaction.channel
+
+    scan = await collect_files_from_thread(thread, audit=True)
+    try:
+        if not scan.yaml_data and not scan.apworld_data:
+            msg = "⚠️ No files found in this thread."
+            if scan.issues:
+                msg += " Run `/status` for details on skipped files."
+            await thread.send(msg)
+            return
+
+        summary = f"📄 {len(scan.yaml_data)} YAML(s)  🌍 {len(scan.apworld_data)} apworld(s)"
+        if scan.issues:
+            summary += " — ⚠️ some files were skipped, run `/status` for details."
+
+        safe_name = re.sub(r'[^\w\-. ]', '_', thread.name)[:50].strip()
+
+        # Try to send everything in one zip
+        combined = _build_gather_zip(scan.yaml_data, scan.apworld_data)
+        try:
+            await thread.send(summary, file=discord.File(io.BytesIO(combined), filename=f"{safe_name}.zip"))
+            return
+        except discord.HTTPException as e:
+            if e.status != 413:
+                raise
+
+        # Too large — split into separate players and custom_worlds zips
+        await thread.send(f"{summary}\n📦 Combined zip too large — sending as separate files:")
+
+        async def send_or_split(zip_name: str, files: dict[str, bytes], folder: str) -> None:
+            """Try sending as a zip; if still too large, fall back to individual files."""
+            data = _build_gather_zip(
+                files if folder == "Players" else {},
+                files if folder == "custom_worlds" else {},
+            )
+            try:
+                await thread.send(file=discord.File(io.BytesIO(data), filename=zip_name))
+                return
+            except discord.HTTPException as e:
+                if e.status != 413:
+                    raise
+            # Zip still too large — send each file individually
+            await thread.send(f"📦 `{zip_name}` too large — sending {len(files)} file(s) individually:")
+            for fname, fdata in files.items():
+                try:
+                    await thread.send(file=discord.File(io.BytesIO(fdata), filename=fname))
+                except discord.HTTPException as e:
+                    if e.status == 413:
+                        await thread.send(f"⚠️ `{fname}` is too large to attach.")
+                    else:
+                        raise
+
+        if scan.yaml_data:
+            await send_or_split("players.zip", scan.yaml_data, "Players")
+        if scan.apworld_data:
+            await send_or_split("custom_worlds.zip", scan.apworld_data, "custom_worlds")
+    finally:
+        global _memory_in_use
+        _memory_in_use -= scan.reserved_bytes
+
+
+@tree.command(name="schedule", description="Schedule a generation for this thread — uses whatever files are posted when the time comes")
+@app_commands.describe(
+    time="When to generate — e.g. 'friday 8pm', 'in 2 hours', '2026-05-15 20:00'",
+    timezone="Your timezone, e.g. 'Europe/London'. Overrides server default. Current default: " + TIMEZONE,
+    cancel="Cancel the scheduled generation for this thread",
+    release="When players can release remaining items (default: auto)",
+    collect="When players can collect remaining items (default: auto)",
+    remaining="When players can query remaining items (default: goal)",
+    spoiler="Spoiler log detail level (default: full)",
+    race="Enable race mode",
+    password="Server join password, only visible to you (optional)",
+    server_password="Admin password, overrides default, only visible to you (optional)",
+    version="Archipelago version to generate with (default: latest)",
+    count=f"Number of seeds to generate (default: 1, max: {MAX_SEEDS_PER_RUN})",
+)
+@app_commands.choices(
+    cancel=[app_commands.Choice(name="yes", value="yes")],
+    release=[app_commands.Choice(name=m, value=m) for m in VALID_RELEASE_COLLECT_MODES],
+    collect=[app_commands.Choice(name=m, value=m) for m in VALID_RELEASE_COLLECT_MODES],
+    remaining=[app_commands.Choice(name=m, value=m) for m in VALID_REMAINING_MODES],
+    spoiler=[app_commands.Choice(name=name, value=str(val)) for name, val in SPOILER_MODES.items()],
+    race=[app_commands.Choice(name="enabled", value="enabled")],
+)
+@app_commands.autocomplete(time=time_autocomplete, timezone=timezone_autocomplete, version=version_autocomplete)
+async def schedule(
+    interaction: discord.Interaction,
+    time: str = None,
+    timezone: str = None,
+    cancel: str = None,
+    release: app_commands.Choice[str] = None,
+    collect: app_commands.Choice[str] = None,
+    remaining: app_commands.Choice[str] = None,
+    spoiler: app_commands.Choice[str] = None,
+    race: str = None,
+    password: str = None,
+    server_password: str = None,
+    version: str = None,
+    count: int = 1,
+):
+    if not is_thread(interaction):
+        await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
+        return
+
+    thread = interaction.channel
+
+    if cancel == "yes":
+        if remove_scheduled_job(thread.id):
+            log.info(f"/schedule cancel in #{thread.name} by {interaction.user}")
+            await interaction.response.send_message("🗓️ Scheduled generation cancelled.", ephemeral=True)
+        else:
+            await interaction.response.send_message("⚠️ No scheduled generation found for this thread.", ephemeral=True)
+        return
+
+    if not time:
+        existing = get_scheduled_job(thread.id)
+        if existing:
+            dt = datetime.fromisoformat(existing["scheduled_utc"])
+            ts = int(dt.timestamp())
+            await interaction.response.send_message(
+                f"🗓️ Generation scheduled for <t:{ts}:F> (<t:{ts}:R>). Use `cancel: yes` to remove it.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "⚠️ No time provided. Pass a `time` to schedule, or `cancel: yes` to cancel.",
+                ephemeral=True,
+            )
+        return
+
+    dt = parse_schedule_time(time, timezone)
+    if not dt:
+        tz_hint = f" (timezone: `{timezone}`)" if timezone else f" (server timezone: `{TIMEZONE}`)"
+        await interaction.response.send_message(
+            f"⚠️ Couldn't parse `{time}` as a future date/time{tz_hint}.",
+            ephemeral=True,
+        )
+        return
+
+    versions = get_installed_versions()
+    if version and version not in versions:
+        await interaction.response.send_message(f"⚠️ Version `{version}` is not installed.", ephemeral=True)
+        return
+
+    opts: dict = {"server_password": server_password or SERVER_PASSWORD}
+    if release:   opts["release_mode"]   = release.value
+    if collect:   opts["collect_mode"]   = collect.value
+    if remaining: opts["remaining_mode"] = remaining.value
+    if spoiler:   opts["spoiler"]        = int(spoiler.value)
+    if race:      opts["race"]           = 1
+    if password:  opts["password"]       = password
+
+    job = {
+        "thread_id":     thread.id,
+        "thread_name":   thread.name,
+        "scheduled_utc": dt.isoformat(),
+        "version":       version,
+        "count":         max(1, min(count, MAX_SEEDS_PER_RUN)),
+        "opts":          opts,
+    }
+
+    # Replace any existing job for this thread
+    replaced = remove_scheduled_job(thread.id)
+    _scheduled.append(job)
+    save_scheduled()
+
+    ts = int(dt.timestamp())
+    tz_used = timezone or TIMEZONE
+    log.info(f"/schedule in #{thread.name} by {interaction.user}: {dt.isoformat()} (tz={tz_used})")
+    suffix = " (replaced previous schedule)" if replaced else ""
+    await interaction.response.send_message(
+        f"🗓️ Generation scheduled for <t:{ts}:F> (<t:{ts}:R>){suffix}.",
+        ephemeral=True,
+    )
+
+
 @tree.command(name="monitor", description="Start monitoring this thread for issues, or stop if already monitoring")
 async def monitor(interaction: discord.Interaction):
     if not is_thread(interaction):
@@ -1403,8 +1775,8 @@ async def monitor(interaction: discord.Interaction):
     collect=[app_commands.Choice(name=m, value=m) for m in VALID_RELEASE_COLLECT_MODES],
     remaining=[app_commands.Choice(name=m, value=m) for m in VALID_REMAINING_MODES],
     spoiler=[app_commands.Choice(name=name, value=str(val)) for name, val in SPOILER_MODES.items()],
-    race=[app_commands.Choice(name="enabled", value="enabled")],
-    dry_run=[app_commands.Choice(name="enabled", value="enabled")],
+    race=[app_commands.Choice(name="yes", value="yes")],
+    dry_run=[app_commands.Choice(name="yes", value="yes")],
 )
 @app_commands.autocomplete(version=version_autocomplete)
 async def generate(
@@ -1555,18 +1927,34 @@ async def generate(
 
 # ── Startup & events ─────────────────────────────────────────────────────────
 
+async def _schedule_checker_loop() -> None:
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            await check_due_schedules()
+        except Exception:
+            log.exception("Error in schedule checker loop")
+        await asyncio.sleep(30)
+
+
 @client.event
 async def on_ready():
-    global _monitors
+    global _monitors, _scheduled
     await tree.sync()
     try:
         _monitors = json.loads(MONITORS_FILE.read_text(encoding="utf-8"))
     except Exception:
         _monitors = {}
+    try:
+        _scheduled = json.loads(SCHEDULED_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        _scheduled = []
     versions = get_installed_versions()
     log.info(f"Logged in as {client.user} — slash commands synced.")
     log.info(f"Installed Archipelago versions: {versions if versions else 'none yet'}")
-    log.info(f"Monitoring {len(_monitors)} thread(s).")
+    log.info(f"Monitoring {len(_monitors)} thread(s). {len(_scheduled)} generation(s) scheduled.")
+    log.info(f"Server timezone: {TIMEZONE}")
+    asyncio.create_task(_schedule_checker_loop())
 
 
 @client.event

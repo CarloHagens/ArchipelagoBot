@@ -69,6 +69,7 @@ On first start, `archipelago-versions` will clone the two latest stable Archipel
 |---|---|
 | `BOT_TOKEN` | Your bot token from the Discord Developer Portal |
 | `SERVER_PASSWORD` | Default admin password for generated rooms (defaults to `archipelago`) |
+| `TIMEZONE` | Default timezone for `/schedule` — e.g. `Europe/London` (defaults to `UTC`) |
 
 ### Updating the bot
 
@@ -92,7 +93,9 @@ Archipelago versions and any ROM files are preserved across updates.
 |---|---|
 | `/generate` | Collect files from the thread, generate the multiworld, and post the room link |
 | `/status` | List files found in the thread and validate YAMLs against archipelago.gg |
+| `/gather` | Collect all YAMLs and apworlds from the thread and attach them as a zip |
 | `/output` | Browse past generation runs and attach a seed to the thread |
+| `/schedule` | Schedule a generation for a future time; run again to update, use `cancel: yes` to remove |
 | `/monitor` | Start live monitoring of the thread — flags issues as files are posted; run again to stop |
 
 `/generate` has optional parameters:
@@ -103,9 +106,9 @@ Archipelago versions and any ROM files are preserved across updates.
 | `collect` | `disabled`, `enabled`, `auto`, `auto-enabled`, `goal` | `auto` |
 | `remaining` | `disabled`, `enabled`, `goal` | `goal` |
 | `spoiler` | `none`, `basic`, `playthrough`, `full` | `full` |
-| `race` | `enabled` | *(off)* |
+| `race` | `yes` | *(off)* |
 | `password` | Any string — only visible to you | *(none)* |
 | `server_password` | Overrides the default admin password — only visible to you | *(none)* |
 | `version` | Installed Archipelago version to use | latest |
-| `dry_run` | `enabled` | *(off)* |
+| `dry_run` | `yes` | *(off)* |
 | `count` | `1`–`20` | `1` |
