@@ -12,8 +12,9 @@ from utils.files import apworld_stem
 from utils.versions import _norm, parse_version
 
 
-HTML_TAG_RE  = re.compile(r'<[^>]+>')
-CHECK_ROW_RE = re.compile(r'<tr[^>]*>.*?<td[^>]*>(.*?)</td>.*?<td[^>]*>(.*?)</td>.*?</tr>', re.DOTALL)
+HTML_TAG_RE    = re.compile(r'<[^>]+>')
+CHECK_ROW_RE   = re.compile(r'<tr[^>]*>.*?<td[^>]*>(.*?)</td>.*?<td[^>]*>(.*?)</td>.*?</tr>', re.DOTALL)
+WORLD_GAME_RE  = re.compile(r'game\s*(?::\s*\w+\s*)?=\s*["\']([^"\']+)["\']')
 
 
 def check_yamls_on_server(yaml_files: dict[str, bytes]) -> dict[str, str]:
@@ -45,8 +46,7 @@ def get_builtin_game_names(version_dir) -> frozenset[str]:
     if worlds_dir.exists():
         for py_file in worlds_dir.glob("*/*.py"):
             try:
-                for match in re.finditer(
-                    r'game\s*(?::\s*\w+\s*)?=\s*["\']([^"\']+)["\']',
+                for match in WORLD_GAME_RE.finditer(
                     py_file.read_text(encoding="utf-8", errors="replace"),
                 ):
                     games.add(match.group(1))
@@ -110,12 +110,18 @@ def get_apworld_info(apworld_bytes: bytes) -> dict:
                     continue
                 try:
                     text = zf.read(entry).decode("utf-8", errors="replace")
-                    m = re.search(
-                        r'apworld_version\s*=\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)',
-                        text,
-                    )
-                    if m:
-                        info["world_version"] = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
+                    if info["world_version"] is None:
+                        m = re.search(
+                            r'apworld_version\s*=\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)',
+                            text,
+                        )
+                        if m:
+                            info["world_version"] = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
+                    if info["game"] is None:
+                        m = WORLD_GAME_RE.search(text)
+                        if m:
+                            info["game"] = m.group(1)
+                    if info["world_version"] is not None and info["game"] is not None:
                         return info
                 except Exception:
                     pass
