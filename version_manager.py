@@ -57,9 +57,11 @@ def symlink_roms(version_dir: Path) -> None:
     for rom in ROMS_DIR.iterdir():
         if rom.is_file():
             link = version_dir / rom.name
-            if not link.exists():
+            try:
                 link.symlink_to(rom)
                 count += 1
+            except FileExistsError:
+                pass
     if count:
         log.info(f"Symlinked {count} ROM(s) into {version_dir.name}")
 

@@ -37,8 +37,7 @@ async def time_autocomplete(interaction: discord.Interaction, current: str):
         f"{(now + timedelta(days=i)).strftime('%A').lower()} 8pm"
         for i in range(1, 8)
     ]
-    seen: set[str] = set()
-    unique = [s for s in suggestions if not (s in seen or seen.add(s))]
+    unique = list(dict.fromkeys(suggestions))
     if current:
         unique = [s for s in unique if current.lower() in s.lower()]
     return [app_commands.Choice(name=s, value=s) for s in unique[:25]]

@@ -18,6 +18,13 @@ from utils.host_yaml import apply_host_yaml_options, restore_host_yaml
 from state import get_generation_sem, get_setup_lock
 
 
+def _filtered_env(tag: str) -> dict:
+    return {
+        **{k: v for k, v in os.environ.items() if k not in ("BOT_TOKEN", "SERVER_PASSWORD")},
+        "PYTHONUSERBASE": f"/archipelago/pyenv/{tag}",
+    }
+
+
 async def setup_and_launch(
     version_dir: Path,
     yaml_data: dict[str, bytes],
@@ -52,10 +59,7 @@ async def setup_and_launch(
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            env={
-                **{k: v for k, v in os.environ.items() if k not in ("BOT_TOKEN", "SERVER_PASSWORD")},
-                "PYTHONUSERBASE": f"/archipelago/pyenv/{version_dir.name}",
-            },
+            env=_filtered_env(version_dir.name),
         )
         proc.stdin.write(b"\n" * 20)
         proc.stdin.close()
@@ -74,9 +78,10 @@ async def _run_one_generation(
     async with get_generation_sem():
         proc = await setup_and_launch(version_dir, yaml_data, apworld_data, temp_output)
         loop = asyncio.get_running_loop()
-        returncode = await loop.run_in_executor(None, proc.wait)
-        if returncode != 0 and proc.stderr:
-            stderr_out = proc.stderr.read().decode("utf-8", errors="replace")
+        _, stderr_bytes = await loop.run_in_executor(None, proc.communicate)
+        returncode = proc.returncode
+        if returncode != 0 and stderr_bytes:
+            stderr_out = stderr_bytes.decode("utf-8", errors="replace")
             filtered = "\n".join(
                 line for line in stderr_out.splitlines()
                 if "UserWarning" not in line and "warnings.warn(" not in line
@@ -105,10 +110,7 @@ def _find_missing_module(log_text: str) -> str | None:
 
 async def _install_missing_module(module_name: str, version_dir: Path) -> bool:
     log.info(f"Installing missing module '{module_name}'...")
-    env = {
-        **{k: v for k, v in os.environ.items() if k not in ("BOT_TOKEN", "SERVER_PASSWORD")},
-        "PYTHONUSERBASE": str(Path("/archipelago/pyenv") / version_dir.name),
-    }
+    env = _filtered_env(version_dir.name)
     loop = asyncio.get_running_loop()
     try:
         result = await loop.run_in_executor(
@@ -226,9 +228,12 @@ async def run_generations(
         key=lambda p: p.stat().st_mtime,
     )
 
-    after_logs = set(logs_dir.glob("Generate_*.txt"))
-    new_logs   = sorted(after_logs - before_logs, key=lambda p: p.stat().st_mtime)
-    errors     = [parse_generation_error(p.read_text(encoding="utf-8", errors="replace")) for p in new_logs]
+    if succeeded < count:
+        after_logs = set(logs_dir.glob("Generate_*.txt"))
+        new_logs   = sorted(after_logs - before_logs, key=lambda p: p.stat().st_mtime)
+        errors     = [parse_generation_error(p.read_text(encoding="utf-8", errors="replace")) for p in new_logs]
+    else:
+        errors = []
 
     log.info(f"{succeeded}/{count} generation(s) succeeded, {len(new_zips)} zip(s) produced.")
     return succeeded, new_zips, errors

@@ -5,6 +5,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import state
+from cogs import is_thread
 from state import get_monitor_lock
 from utils.monitor_helpers import (
     format_resolved, is_monitored, load_monitors, save_monitors, unregister_monitor,
@@ -12,10 +13,6 @@ from utils.monitor_helpers import (
 from utils.thread_collector import audit_thread
 
 log = logging.getLogger('bot')
-
-
-def is_thread(interaction: discord.Interaction) -> bool:
-    return isinstance(interaction.channel, discord.Thread)
 
 
 class MonitorCog(commands.Cog):

@@ -1,8 +1,17 @@
 import io
+import json
 import zipfile
 from pathlib import Path
 
-from config import UTF8_BOM
+from config import UTF8_BOM, log
+
+
+def load_json_file(path: Path, default):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning(f"Could not load {path.name}: {e}")
+        return default
 
 
 def normalise_yaml_bytes(raw: bytes) -> bytes:

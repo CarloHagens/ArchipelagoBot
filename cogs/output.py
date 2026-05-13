@@ -5,6 +5,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs import is_thread
 from utils.autocomplete import run_autocomplete, seed_autocomplete
 from utils.runs import load_runs
 
@@ -19,7 +20,7 @@ class OutputCog(commands.Cog):
     @app_commands.describe(run="Generation run to pick from", seed="Seed to attach")
     @app_commands.autocomplete(run=run_autocomplete, seed=seed_autocomplete)
     async def output(self, interaction: discord.Interaction, run: str, seed: str):
-        if not isinstance(interaction.channel, discord.Thread):
+        if not is_thread(interaction):
             await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
             return
 

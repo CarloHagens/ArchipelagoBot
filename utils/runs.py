@@ -2,16 +2,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from config import MAX_RUNS, RUNS_FILE
-from config import log
-
-
-def load_json_file(path: Path, default):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        log.warning(f"Could not load {path.name}: {e}")
-        return default
+from config import MAX_RUNS, RUNS_FILE, log
+from utils.files import load_json_file
 
 
 def load_runs() -> list[dict]:
@@ -33,9 +25,10 @@ def save_runs(runs: list[dict]) -> None:
 
 
 def record_run(thread_id: int, thread_name: str, version: str, zips_with_counts: list[tuple[Path, int | None]]) -> dict:
+    now = datetime.now()
     run = {
-        "id":          datetime.now().strftime("%Y%m%d_%H%M%S"),
-        "timestamp":   datetime.now().isoformat(),
+        "id":          now.strftime("%Y%m%d_%H%M%S"),
+        "timestamp":   now.isoformat(),
         "thread_id":   thread_id,
         "thread_name": thread_name,
         "version":     version,

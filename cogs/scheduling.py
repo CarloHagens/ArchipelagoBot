@@ -7,8 +7,9 @@ from discord import app_commands
 from discord.ext import commands
 
 import state
+from cogs import build_generation_opts, is_thread
 from config import (
-    MAX_SEEDS_PER_RUN, SERVER_PASSWORD, TIMEZONE,
+    MAX_SEEDS_PER_RUN, TIMEZONE,
     VALID_RELEASE_COLLECT_MODES, VALID_REMAINING_MODES, SPOILER_MODES,
 )
 from utils.autocomplete import time_autocomplete, timezone_autocomplete, version_autocomplete
@@ -20,10 +21,6 @@ from utils.thread_collector import collect_files_from_thread
 from utils.versions import get_installed_versions, get_version_dir
 
 log = logging.getLogger('bot')
-
-
-def is_thread(interaction: discord.Interaction) -> bool:
-    return isinstance(interaction.channel, discord.Thread)
 
 
 class SchedulingCog(commands.Cog):
@@ -59,8 +56,12 @@ class SchedulingCog(commands.Cog):
             return
         now = datetime.now(timezone.utc)
         due = [j for j in state.scheduled if datetime.fromisoformat(j["scheduled_utc"]) <= now]
+        if not due:
+            return
+        due_ids = {j["thread_id"] for j in due}
+        state.scheduled[:] = [j for j in state.scheduled if j["thread_id"] not in due_ids]
+        save_scheduled()
         for job in due:
-            remove_scheduled_job(job["thread_id"])
             log.info(f"Firing scheduled generation for thread {job['thread_id']} ({job['thread_name']})")
             try:
                 thread = await self.bot.fetch_channel(job["thread_id"])
@@ -195,13 +196,7 @@ class SchedulingCog(commands.Cog):
             await interaction.response.send_message(f"⚠️ Version `{version}` is not installed.", ephemeral=True)
             return
 
-        opts: dict = {"server_password": server_password or SERVER_PASSWORD}
-        if release:   opts["release_mode"]   = release.value
-        if collect:   opts["collect_mode"]   = collect.value
-        if remaining: opts["remaining_mode"] = remaining.value
-        if spoiler:   opts["spoiler"]        = int(spoiler.value)
-        if race:      opts["race"]           = 1
-        if password:  opts["password"]       = password
+        opts = build_generation_opts(server_password, release, collect, remaining, spoiler, race, password)
 
         job = {
             "thread_id":     thread.id,

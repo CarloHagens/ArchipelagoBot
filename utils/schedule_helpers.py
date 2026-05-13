@@ -5,14 +5,11 @@ import dateparser
 
 import state
 from config import SCHEDULED_FILE, TIMEZONE, log
+from utils.files import load_json_file
 
 
 def load_scheduled() -> list:
-    try:
-        return json.loads(SCHEDULED_FILE.read_text(encoding="utf-8"))
-    except Exception as e:
-        log.warning(f"Could not load {SCHEDULED_FILE.name}: {e}")
-        return []
+    return load_json_file(SCHEDULED_FILE, [])
 
 
 def save_scheduled() -> None:

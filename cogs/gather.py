@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import state
+from cogs import is_thread
 from utils.files import _build_gather_zip
 from utils.thread_collector import collect_files_from_thread
 
@@ -19,7 +20,7 @@ class GatherCog(commands.Cog):
 
     @app_commands.command(name="gather", description="Collect all YAMLs and apworlds from this thread and attach them as a zip")
     async def gather(self, interaction: discord.Interaction):
-        if not isinstance(interaction.channel, discord.Thread):
+        if not is_thread(interaction):
             await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
             return
 

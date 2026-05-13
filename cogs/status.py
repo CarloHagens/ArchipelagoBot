@@ -5,6 +5,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import state
+from cogs import is_thread
 from utils.thread_collector import audit_thread
 
 log = logging.getLogger('bot')
@@ -16,7 +17,7 @@ class StatusCog(commands.Cog):
 
     @app_commands.command(name="status", description="List files found in this thread and validate YAMLs against archipelago.gg")
     async def status(self, interaction: discord.Interaction):
-        if not isinstance(interaction.channel, discord.Thread):
+        if not is_thread(interaction):
             await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
             return
 

@@ -5,6 +5,7 @@ import discord
 
 import state
 from config import MONITORS_FILE, log
+from utils.files import load_json_file
 
 
 _MENTION_RE = re.compile(r'<@!?\d+>\s*')
@@ -21,11 +22,7 @@ def is_monitored(channel) -> bool:
 
 
 def load_monitors() -> dict:
-    try:
-        return json.loads(MONITORS_FILE.read_text(encoding="utf-8"))
-    except Exception as e:
-        log.warning(f"Could not load {MONITORS_FILE.name}: {e}")
-        return {}
+    return load_json_file(MONITORS_FILE, {})
 
 
 def save_monitors() -> None:

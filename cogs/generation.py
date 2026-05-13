@@ -5,8 +5,9 @@ from discord import app_commands
 from discord.ext import commands
 
 import state
+from cogs import build_generation_opts, is_thread
 from config import (
-    MAX_SEEDS_PER_RUN, SERVER_PASSWORD,
+    MAX_SEEDS_PER_RUN,
     VALID_RELEASE_COLLECT_MODES, VALID_REMAINING_MODES, SPOILER_MODES,
 )
 from utils.autocomplete import version_autocomplete
@@ -15,10 +16,6 @@ from utils.versions import get_installed_versions, get_version_dir
 from utils.thread_collector import collect_files_from_thread
 
 log = logging.getLogger('bot')
-
-
-def is_thread(interaction: discord.Interaction) -> bool:
-    return isinstance(interaction.channel, discord.Thread)
 
 
 class GenerationCog(commands.Cog):
@@ -107,14 +104,7 @@ class GenerationCog(commands.Cog):
             seed_label = "seed" if count == 1 else f"{count} seeds"
             await thread.send(f"⚙️ Found **{len(yaml_data)}** yaml(s) and **{len(apworld_data)}** apworld(s). Generating {seed_label}… this may take a minute.")
 
-            gen_opts: dict = {"server_password": server_password or SERVER_PASSWORD}
-            if release:   gen_opts["release_mode"]   = release.value
-            if collect:   gen_opts["collect_mode"]   = collect.value
-            if remaining: gen_opts["remaining_mode"] = remaining.value
-            if spoiler:   gen_opts["spoiler"]        = int(spoiler.value)
-            if race:      gen_opts["race"]           = 1
-            if password:  gen_opts["password"]       = password
-
+            gen_opts = build_generation_opts(server_password, release, collect, remaining, spoiler, race, password)
             await execute_generation(self.bot.user, thread, gen_opts, version_dir, yaml_data, apworld_data, yaml_uploaders, count, dry_run=dry_run == "yes")
 
         finally:
