@@ -7,6 +7,9 @@ WORKDIR /bot
 RUN pip install --quiet discord.py requests pyyaml py_randomprime dateparser
 
 COPY archipelago_bot.py version_manager.py ./
+COPY config.py state.py views.py ./
+COPY utils/ ./utils/
+COPY cogs/ ./cogs/
 
 RUN useradd -m -u 1000 botuser
 USER botuser
