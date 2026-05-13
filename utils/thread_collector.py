@@ -18,6 +18,10 @@ from utils.yaml_validation import (
 )
 
 
+def _norm_match(a: str, b: str) -> bool:
+    return a in b or b in a
+
+
 @dataclass
 class ScanResult:
     yaml_data:         dict = field(default_factory=dict)
@@ -216,18 +220,17 @@ async def audit_thread(thread, bot_user: discord.User) -> ScanResult:
                 f"but the latest installed version is `{latest}`.",
             ))
 
-    # Prefer the game name extracted from the apworld's Python source over the filename stem,
-    # so that abbreviations like "dkc.apworld" match a YAML whose game is "Donkey Kong Country".
     apworld_keys_norm = {
-        _norm(apworld_infos[name]["game"]) if apworld_infos[name].get("game") else _norm(apworld_stem(name)): name
-        for name in result.apworld_data
+        _norm(info["game"]): name
+        for name, info in apworld_infos.items()
+        if info.get("game")
     }
     yaml_games_by_name = {name: get_yaml_game(data) for name, data in result.yaml_data.items()}
 
     yaml_games_normalised = {_norm(game or "") for game in yaml_games_by_name.values()}
     for norm_key, apworld_name in apworld_keys_norm.items():
         has_yaml = any(
-            norm_key in game_norm or game_norm in norm_key
+            _norm_match(norm_key, game_norm)
             for game_norm in yaml_games_normalised
             if game_norm
         )
@@ -246,7 +249,7 @@ async def audit_thread(thread, bot_user: discord.User) -> ScanResult:
             if builtin_games and game not in builtin_games:
                 norm_game   = _norm(game or "")
                 has_apworld = any(
-                    nk in norm_game or norm_game in nk
+                    _norm_match(nk, norm_game)
                     for nk in apworld_keys_norm
                 )
                 if not has_apworld:
@@ -266,7 +269,7 @@ async def audit_thread(thread, bot_user: discord.User) -> ScanResult:
                     continue
                 norm_req = _norm(req_game)
                 matching_stem = next(
-                    (s for s in apworld_keys_norm if s in norm_req or norm_req in s),
+                    (s for s in apworld_keys_norm if _norm_match(s, norm_req)),
                     None,
                 )
                 if matching_stem is None:

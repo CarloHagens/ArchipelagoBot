@@ -8,7 +8,7 @@ import requests
 import yaml
 
 from config import ARCHIPELAGO_BASE
-from utils.files import apworld_stem
+
 from utils.versions import _norm, parse_version
 
 
