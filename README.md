@@ -98,7 +98,7 @@ Archipelago versions and any ROM files are preserved across updates.
 | `/schedule` | Schedule a generation for a future time; run again to update, use `cancel: yes` to remove |
 | `/monitor` | Start live monitoring of the thread — flags issues as files are posted; run again to stop |
 
-`/generate` has optional parameters:
+Both `/generate` and `/schedule` share these optional parameters:
 
 | Parameter | Options | Default |
 |---|---|---|
@@ -107,25 +107,21 @@ Archipelago versions and any ROM files are preserved across updates.
 | `remaining` | `disabled`, `enabled`, `goal` | `goal` |
 | `spoiler` | `none`, `basic`, `playthrough`, `full` | `full` |
 | `race` | `yes` | *(off)* |
-| `password` | Any string — only visible to you | *(none)* |
+| `password` | Server join password — only visible to you | *(none)* |
 | `server_password` | Overrides the default admin password — only visible to you | *(none)* |
 | `version` | Installed Archipelago version to use | latest |
-| `dry_run` | `yes` | *(off)* |
 | `count` | `1`–`20` | `1` |
 
-`/schedule` has the following parameters:
+`/generate` only:
+
+| Parameter | Options | Default |
+|---|---|---|
+| `dry_run` | `yes` | *(off)* |
+
+`/schedule` only:
 
 | Parameter | Options | Default |
 |---|---|---|
 | `time` | Natural language — e.g. `friday 8pm`, `in 2 hours`, `2026-05-15 20:00` | *(required)* |
 | `timezone` | Timezone name — e.g. `Europe/London`, `America/New_York` | Server default (`TIMEZONE` env var) |
 | `cancel` | `yes` | *(off)* |
-| `release` | `disabled`, `enabled`, `auto`, `auto-enabled`, `goal` | `auto` |
-| `collect` | `disabled`, `enabled`, `auto`, `auto-enabled`, `goal` | `auto` |
-| `remaining` | `disabled`, `enabled`, `goal` | `goal` |
-| `spoiler` | `none`, `basic`, `playthrough`, `full` | `full` |
-| `race` | `yes` | *(off)* |
-| `password` | Any string — only visible to you | *(none)* |
-| `server_password` | Overrides the default admin password — only visible to you | *(none)* |
-| `version` | Installed Archipelago version to use | latest |
-| `count` | `1`–`20` | `1` |
