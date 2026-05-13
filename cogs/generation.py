@@ -65,7 +65,8 @@ class GenerationCog(commands.Cog):
             await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        ephemeral = bool(password or server_password)
+        await interaction.response.defer(ephemeral=ephemeral)
 
         log.info(f"/generate invoked by {interaction.user} in #{interaction.channel.name} (version={version or 'latest'}, count={count}, dry_run={dry_run})")
         reserved_bytes = 0

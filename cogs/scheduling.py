@@ -154,12 +154,13 @@ class SchedulingCog(commands.Cog):
             await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
             return
 
+        ephemeral = bool(password or server_password)
         thread = interaction.channel
 
         if cancel == "yes":
             if remove_scheduled_job(thread.id):
                 log.info(f"/schedule cancel in #{thread.name} by {interaction.user}")
-                await interaction.response.send_message("🗓️ Scheduled generation cancelled.", ephemeral=True)
+                await interaction.response.send_message("🗓️ Scheduled generation cancelled.", ephemeral=ephemeral)
             else:
                 await interaction.response.send_message("⚠️ No scheduled generation found for this thread.", ephemeral=True)
             return
@@ -221,5 +222,5 @@ class SchedulingCog(commands.Cog):
         suffix = " (replaced previous schedule)" if replaced else ""
         await interaction.response.send_message(
             f"🗓️ Generation scheduled for <t:{ts}:F> (<t:{ts}:R>){suffix}.",
-            ephemeral=True,
+            ephemeral=ephemeral,
         )
