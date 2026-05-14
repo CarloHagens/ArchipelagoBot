@@ -8,7 +8,7 @@ import state
 from cogs import build_generation_opts, is_thread
 from config import (
     MAX_SEEDS_PER_RUN,
-    VALID_RELEASE_COLLECT_MODES, VALID_REMAINING_MODES, SPOILER_MODES,
+    VALID_RELEASE_COLLECT_MODES, VALID_REMAINING_MODES, SPOILER_MODES, HOST_OPTIONS,
 )
 from utils.autocomplete import version_autocomplete
 from utils.generation import execute_generation
@@ -34,6 +34,7 @@ class GenerationCog(commands.Cog):
         version="Archipelago version to generate with (default: latest)",
         dry_run="Generate locally without uploading to archipelago.gg",
         count=f"Number of seeds to generate (default: 1, max: {MAX_SEEDS_PER_RUN})",
+        host="Where to host the room (default: archipelago.gg)",
     )
     @app_commands.choices(
         release=[app_commands.Choice(name=m, value=m) for m in VALID_RELEASE_COLLECT_MODES],
@@ -42,6 +43,7 @@ class GenerationCog(commands.Cog):
         spoiler=[app_commands.Choice(name=name, value=str(val)) for name, val in SPOILER_MODES.items()],
         race=[app_commands.Choice(name="yes", value="yes")],
         dry_run=[app_commands.Choice(name="yes", value="yes")],
+        host=[app_commands.Choice(name=url, value=url) for url in HOST_OPTIONS],
     )
     @app_commands.autocomplete(version=version_autocomplete)
     async def generate(
@@ -57,9 +59,14 @@ class GenerationCog(commands.Cog):
         version: str = None,
         dry_run: str = None,
         count: int = 1,
+        host: str = None,
     ):
         if not is_thread(interaction):
             await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
+            return
+
+        if dry_run == "yes" and host:
+            await interaction.response.send_message("⚠️ `host` cannot be used with `dry_run` — dry runs are not uploaded.", ephemeral=True)
             return
 
         ephemeral = bool(password or server_password)
@@ -105,7 +112,7 @@ class GenerationCog(commands.Cog):
             await thread.send(f"⚙️ Found **{len(yaml_data)}** yaml(s) and **{len(apworld_data)}** apworld(s). Generating {seed_label}… this may take a minute.")
 
             gen_opts = build_generation_opts(server_password, release, collect, remaining, spoiler, race, password)
-            await execute_generation(self.bot.user, thread, gen_opts, version_dir, yaml_data, apworld_data, yaml_uploaders, count, dry_run=dry_run == "yes")
+            await execute_generation(self.bot.user, thread, gen_opts, version_dir, yaml_data, apworld_data, yaml_uploaders, count, dry_run=dry_run == "yes", host=host)
 
         finally:
             state.memory_in_use -= reserved_bytes

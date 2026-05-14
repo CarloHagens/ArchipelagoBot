@@ -10,7 +10,7 @@ import state
 from cogs import build_generation_opts, is_thread
 from config import (
     MAX_SEEDS_PER_RUN, TIMEZONE,
-    VALID_RELEASE_COLLECT_MODES, VALID_REMAINING_MODES, SPOILER_MODES,
+    VALID_RELEASE_COLLECT_MODES, VALID_REMAINING_MODES, SPOILER_MODES, HOST_OPTIONS,
 )
 from utils.autocomplete import time_autocomplete, timezone_autocomplete, version_autocomplete
 from utils.generation import execute_generation
@@ -100,6 +100,7 @@ class SchedulingCog(commands.Cog):
             await execute_generation(
                 self.bot.user, thread, job.get("opts", {}), version_dir,
                 scan.yaml_data, scan.apworld_data, scan.yaml_uploaders, count,
+                host=job.get("host"),
             )
 
         except Exception:
@@ -125,6 +126,7 @@ class SchedulingCog(commands.Cog):
         server_password="Admin password, overrides default, only visible to you (optional)",
         version="Archipelago version to generate with (default: latest)",
         count=f"Number of seeds to generate (default: 1, max: {MAX_SEEDS_PER_RUN})",
+        host="Where to host the room (default: archipelago.gg)",
     )
     @app_commands.choices(
         cancel=[app_commands.Choice(name="yes", value="yes")],
@@ -133,6 +135,7 @@ class SchedulingCog(commands.Cog):
         remaining=[app_commands.Choice(name=m, value=m) for m in VALID_REMAINING_MODES],
         spoiler=[app_commands.Choice(name=name, value=str(val)) for name, val in SPOILER_MODES.items()],
         race=[app_commands.Choice(name="yes", value="yes")],
+        host=[app_commands.Choice(name=url, value=url) for url in HOST_OPTIONS],
     )
     @app_commands.autocomplete(time=time_autocomplete, timezone=timezone_autocomplete, version=version_autocomplete)
     async def schedule(
@@ -150,6 +153,7 @@ class SchedulingCog(commands.Cog):
         server_password: str = None,
         version: str = None,
         count: int = 1,
+        host: str = None,
     ):
         if not is_thread(interaction):
             await interaction.response.send_message("⚠️ This command must be used inside a thread.", ephemeral=True)
@@ -205,6 +209,7 @@ class SchedulingCog(commands.Cog):
             "version":       version,
             "count":         max(1, min(count, MAX_SEEDS_PER_RUN)),
             "opts":          opts,
+            "host":          host,
         }
 
         replaced = remove_scheduled_job(thread.id)

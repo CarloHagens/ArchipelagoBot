@@ -70,6 +70,7 @@ On first start, `archipelago-versions` will clone the two latest stable Archipel
 | `BOT_TOKEN` | Your bot token from the Discord Developer Portal |
 | `SERVER_PASSWORD` | Default admin password for generated rooms (defaults to `archipelago`) |
 | `TIMEZONE` | Default timezone for `/schedule` — e.g. `Europe/London` (defaults to `UTC`) |
+| `EXTRA_HOSTS` | Comma-separated list of additional URLs to offer as host locations — e.g. `https://example.com,https://other.com` |
 
 ### Updating the bot
 
@@ -111,12 +112,13 @@ Both `/generate` and `/schedule` share these optional parameters:
 | `server_password` | Overrides the default admin password — only visible to you | *(none)* |
 | `version` | Installed Archipelago version to use | latest |
 | `count` | `1`–`20` | `1` |
+| `host` | Configured host URLs | `https://archipelago.gg` |
 
 `/generate` only:
 
 | Parameter | Options | Default |
 |---|---|---|
-| `dry_run` | `yes` | *(off)* |
+| `dry_run` | `yes` — cannot be combined with `host` | *(off)* |
 
 `/schedule` only:
 

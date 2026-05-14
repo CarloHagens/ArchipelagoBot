@@ -10,6 +10,10 @@ VERSIONS_DIR     = Path("/archipelago/versions")
 ROMS_DIR         = Path("/roms")
 ARCHIPELAGO_BASE = "https://archipelago.gg"
 
+HOST_OPTIONS = [ARCHIPELAGO_BASE] + [
+    url.strip() for url in os.environ.get("EXTRA_HOSTS", "").split(",") if url.strip()
+]
+
 GITHUB_RELEASE_RE = re.compile(
     r'https://github\.com/([^/]+)/([^/]+)/releases/tag/([^\s>]+)'
 )

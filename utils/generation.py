@@ -327,6 +327,7 @@ async def execute_generation(
     yaml_uploaders: dict,
     count: int,
     dry_run: bool = False,
+    host: str | None = None,
 ) -> None:
     """Run generation(s), record, and post results to the thread.
     Memory management is the caller's responsibility."""
@@ -369,9 +370,11 @@ async def execute_generation(
             await thread.send("✅ Dry run complete!")
             return
         unregister_monitor(thread.id)
-        await thread.send("✅ Generation complete! Uploading to archipelago.gg…")
+        from config import ARCHIPELAGO_BASE
+        upload_host = host or ARCHIPELAGO_BASE
+        await thread.send(f"✅ Generation complete! Uploading to {upload_host}…")
         try:
-            room_url = await loop.run_in_executor(None, upload_and_create_room, new_zips[0])
+            room_url = await loop.run_in_executor(None, upload_and_create_room, new_zips[0], upload_host)
             mark_run_uploaded(run["id"], new_zips[0])
             await thread.send(f"🎉 Room is ready! <{room_url}>")
         except Exception as e:
@@ -388,7 +391,8 @@ async def execute_generation(
         failed_line = f"\n❌ {count - succeeded} seed(s) failed." if succeeded < count else ""
         await thread.send(f"✅ {succeeded}/{count} seeds generated:\n" + "\n".join(lines) + failed_line)
         if dry_run:
+            await thread.send("✅ Dry run complete!")
             return
         unregister_monitor(thread.id)
-        view = SeedSelectView(zips_with_counts, thread, run["id"])
+        view = SeedSelectView(zips_with_counts, thread, run["id"], host=host)
         await thread.send("Pick a seed to upload:", view=view)

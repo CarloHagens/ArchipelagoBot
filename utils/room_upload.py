@@ -5,14 +5,14 @@ import requests
 from config import ARCHIPELAGO_BASE, log
 
 
-def upload_and_create_room(zip_path: Path) -> str:
-    log.info(f"Uploading {zip_path.name} to archipelago.gg...")
+def upload_and_create_room(zip_path: Path, base_url: str = ARCHIPELAGO_BASE) -> str:
+    log.info(f"Uploading {zip_path.name} to {base_url}...")
     session = requests.Session()
     session.headers.update({"User-Agent": "ArchipelagoDiscordBot/1.0"})
 
     with open(zip_path, "rb") as f:
         upload = session.post(
-            f"{ARCHIPELAGO_BASE}/uploads",
+            f"{base_url}/uploads",
             files={"file": (zip_path.name, f, "application/zip")},
             allow_redirects=True,
             timeout=120,
@@ -23,7 +23,7 @@ def upload_and_create_room(zip_path: Path) -> str:
         raise RuntimeError(f"Unexpected redirect after upload: {upload.url}")
     seed_id = upload.url.rstrip("/").split("/seed/")[-1]
 
-    room = session.get(f"{ARCHIPELAGO_BASE}/new_room/{seed_id}", allow_redirects=True, timeout=30)
+    room = session.get(f"{base_url}/new_room/{seed_id}", allow_redirects=True, timeout=30)
     room.raise_for_status()
 
     if "/room/" not in room.url:

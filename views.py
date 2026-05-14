@@ -11,9 +11,10 @@ log = logging.getLogger('bot')
 
 
 class SeedSelect(discord.ui.Select):
-    def __init__(self, zips_with_counts: list[tuple[Path, int | None]], thread, run_id: str):
+    def __init__(self, zips_with_counts: list[tuple[Path, int | None]], thread, run_id: str, host: str | None = None):
         self.thread  = thread
         self.run_id  = run_id
+        self.host    = host
         options = [
             discord.SelectOption(
                 label=p.name[:100],
@@ -32,11 +33,13 @@ class SeedSelect(discord.ui.Select):
         await interaction.message.edit(view=self.view)
         self.view.stop()
 
+        from config import ARCHIPELAGO_BASE
+        upload_host = self.host or ARCHIPELAGO_BASE
         zip_path = Path(self.values[0])
-        await self.thread.send("⬆️ Uploading to archipelago.gg…")
+        await self.thread.send(f"⬆️ Uploading to {upload_host}…")
         try:
             loop = asyncio.get_running_loop()
-            room_url = await loop.run_in_executor(None, upload_and_create_room, zip_path)
+            room_url = await loop.run_in_executor(None, upload_and_create_room, zip_path, upload_host)
             mark_run_uploaded(self.run_id, zip_path)
             await self.thread.send(f"🎉 Room is ready! <{room_url}>")
         except Exception as e:
@@ -45,9 +48,9 @@ class SeedSelect(discord.ui.Select):
 
 
 class SeedSelectView(discord.ui.View):
-    def __init__(self, zips_with_counts: list[tuple[Path, int | None]], thread, run_id: str):
+    def __init__(self, zips_with_counts: list[tuple[Path, int | None]], thread, run_id: str, host: str | None = None):
         super().__init__(timeout=300)
-        self.add_item(SeedSelect(zips_with_counts, thread, run_id))
+        self.add_item(SeedSelect(zips_with_counts, thread, run_id, host=host))
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
         log.exception(f"Error in SeedSelectView item {item}: {error}")
