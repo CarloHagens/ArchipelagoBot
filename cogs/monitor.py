@@ -6,6 +6,7 @@ from discord.ext import commands
 
 import state
 from cogs import is_thread
+from config import GITHUB_RELEASE_RE
 from state import get_audit_lock
 from utils.monitor_helpers import (
     format_resolved, is_monitored, load_monitors, save_monitors, unregister_monitor,
@@ -15,11 +16,16 @@ from utils.thread_collector import audit_thread
 log = logging.getLogger('bot')
 
 
-def _has_relevant_attachments(message: discord.Message) -> bool:
-    return any(
-        a.filename.lower().endswith((".yaml", ".yml", ".apworld"))
-        for a in message.attachments
-    )
+def _has_relevant_content(message: discord.Message) -> bool:
+    if any(a.filename.lower().endswith((".yaml", ".yml", ".apworld")) for a in message.attachments):
+        return True
+    return bool(message.content and GITHUB_RELEASE_RE.search(message.content))
+
+
+def _github_links(message: discord.Message) -> set:
+    if not message.content:
+        return set()
+    return {m.group(0) for m in GITHUB_RELEASE_RE.finditer(message.content)}
 
 
 class MonitorCog(commands.Cog):
@@ -38,7 +44,7 @@ class MonitorCog(commands.Cog):
             return
         if not is_monitored(message.channel):
             return
-        if not _has_relevant_attachments(message):
+        if not _has_relevant_content(message):
             return
         try:
             await self._check_monitored_thread(message.channel)
@@ -49,7 +55,7 @@ class MonitorCog(commands.Cog):
     async def on_message_delete(self, message: discord.Message):
         if not is_monitored(message.channel):
             return
-        if not _has_relevant_attachments(message):
+        if not _has_relevant_content(message):
             return
         try:
             await self._check_monitored_thread(message.channel)
@@ -60,11 +66,13 @@ class MonitorCog(commands.Cog):
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         if after.author == self.bot.user:
             return
-        if before.attachments == after.attachments:
-            return
         if not is_monitored(after.channel):
             return
-        if not _has_relevant_attachments(before) and not _has_relevant_attachments(after):
+        attachments_changed = before.attachments != after.attachments
+        github_links_changed = _github_links(before) != _github_links(after)
+        if not attachments_changed and not github_links_changed:
+            return
+        if not _has_relevant_content(before) and not _has_relevant_content(after):
             return
         try:
             await self._check_monitored_thread(after.channel)
