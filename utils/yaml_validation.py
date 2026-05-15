@@ -55,46 +55,64 @@ def get_builtin_game_names(version_dir) -> frozenset[str]:
     return frozenset(games)
 
 
-def get_yaml_name(yaml_bytes: bytes) -> str | None:
+def _iter_yaml_docs(yaml_bytes: bytes):
     try:
-        data = yaml.safe_load(yaml_bytes)
-        if not isinstance(data, dict):
-            return None
-        name = data.get("name")
-        return str(name).strip() if name else None
+        for doc in yaml.safe_load_all(yaml_bytes):
+            if isinstance(doc, dict):
+                yield doc
     except Exception:
-        return None
+        pass
+
+
+def get_yaml_names(yaml_bytes: bytes) -> list[str]:
+    names = []
+    for doc in _iter_yaml_docs(yaml_bytes):
+        name = doc.get("name")
+        if name:
+            names.append(str(name).strip())
+    return names
+
+
+def get_yaml_name(yaml_bytes: bytes) -> str | None:
+    names = get_yaml_names(yaml_bytes)
+    return names[0] if names else None
+
+
+def get_yaml_games(yaml_bytes: bytes) -> list[str]:
+    games = []
+    for doc in _iter_yaml_docs(yaml_bytes):
+        game = doc.get("game")
+        if isinstance(game, dict):
+            games.extend(str(g).strip() for g in game if g)
+        elif game:
+            games.append(str(game).strip())
+    return games
 
 
 def get_yaml_game(yaml_bytes: bytes) -> str | None:
-    try:
-        data = yaml.safe_load(yaml_bytes)
-        if not isinstance(data, dict):
-            return None
-        game = data.get("game")
-        if isinstance(game, dict):
-            game = next(iter(game))
-        return str(game).strip() if game else None
-    except Exception:
-        return None
+    games = get_yaml_games(yaml_bytes)
+    return games[0] if games else None
 
 
 def get_yaml_requires(yaml_bytes: bytes) -> tuple[str | None, dict[str, str]]:
+    max_ap_version: str | None = None
+    all_game_reqs: dict[str, str] = {}
     try:
-        data = yaml.safe_load(yaml_bytes)
-        if not isinstance(data, dict):
-            return None, {}
-        req = data.get("requires")
-        if not isinstance(req, dict):
-            return None, {}
-        ap_version = req.get("version")
-        ap_version = str(ap_version).strip() if ap_version is not None else None
-        game_reqs  = req.get("game") or {}
-        if not isinstance(game_reqs, dict):
-            game_reqs = {}
-        return ap_version, {str(k): str(v) for k, v in game_reqs.items()}
+        for doc in _iter_yaml_docs(yaml_bytes):
+            req = doc.get("requires")
+            if not isinstance(req, dict):
+                continue
+            ap_version = req.get("version")
+            if ap_version is not None:
+                v = str(ap_version).strip()
+                if max_ap_version is None or parse_version(v) > parse_version(max_ap_version):
+                    max_ap_version = v
+            game_reqs = req.get("game") or {}
+            if isinstance(game_reqs, dict):
+                all_game_reqs.update({str(k): str(v) for k, v in game_reqs.items()})
     except Exception:
-        return None, {}
+        pass
+    return max_ap_version, all_game_reqs
 
 
 def get_apworld_info(apworld_bytes: bytes) -> dict:

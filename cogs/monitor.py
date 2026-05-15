@@ -6,7 +6,7 @@ from discord.ext import commands
 
 import state
 from cogs import is_thread
-from state import get_monitor_lock
+from state import get_audit_lock
 from utils.monitor_helpers import (
     format_resolved, is_monitored, load_monitors, save_monitors, unregister_monitor,
 )
@@ -72,7 +72,7 @@ class MonitorCog(commands.Cog):
             log.exception(f"Error in on_message_edit monitor check for thread {after.channel.id}")
 
     async def _check_monitored_thread(self, thread: discord.Thread) -> None:
-        lock = get_monitor_lock(thread.id)
+        lock = get_audit_lock(thread.id)
         if lock.locked():
             log.info(f"[monitor #{thread.name}] Scan already in progress — queuing re-check.")
             state.monitor_pending.add(thread.id)

@@ -17,8 +17,8 @@ def _get_lock(key: str) -> asyncio.Lock:
     return locks[key]
 
 
-def get_monitor_lock(thread_id: int) -> asyncio.Lock:
-    return _get_lock(f"monitor:{thread_id}")
+def get_audit_lock(thread_id: int) -> asyncio.Lock:
+    return _get_lock(f"audit:{thread_id}")
 
 
 def get_setup_lock(version_dir) -> asyncio.Lock:

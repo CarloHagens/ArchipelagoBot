@@ -6,6 +6,7 @@ from discord.ext import commands
 
 import state
 from cogs import is_thread
+from state import get_audit_lock
 from utils.thread_collector import audit_thread
 
 log = logging.getLogger('bot')
@@ -25,20 +26,21 @@ class StatusCog(commands.Cog):
         await interaction.response.send_message("🔍 Scanning and validating thread…")
         thread = interaction.channel
 
-        result = await audit_thread(thread, self.bot.user)
-        try:
-            yaml_list    = ", ".join(f"`{f}`" for f in result.yaml_data)    or "none"
-            apworld_list = ", ".join(f"`{f}`" for f in result.apworld_data) or "none"
-            msg = (
-                f"**Files found in this thread:**\n"
-                f"📄 **YAMLs ({len(result.yaml_data)}):** {yaml_list}\n"
-                f"🌍 **APworlds ({len(result.apworld_data)}):** {apworld_list}"
-            )
-            if result.issues:
-                issue_lines = "\n".join(display for _, display in result.issues)
-                msg += f"\n\n⚠️ **Issues:**\n{issue_lines}"
-            else:
-                msg += "\n\n✅ No issues found."
-            await thread.send(msg)
-        finally:
-            state.memory_in_use -= result.reserved_bytes
+        async with get_audit_lock(thread.id):
+            result = await audit_thread(thread, self.bot.user)
+            try:
+                yaml_list    = ", ".join(f"`{f}`" for f in result.yaml_data)    or "none"
+                apworld_list = ", ".join(f"`{f}`" for f in result.apworld_data) or "none"
+                msg = (
+                    f"**Files found in this thread:**\n"
+                    f"📄 **YAMLs ({len(result.yaml_data)}):** {yaml_list}\n"
+                    f"🌍 **APworlds ({len(result.apworld_data)}):** {apworld_list}"
+                )
+                if result.issues:
+                    issue_lines = "\n".join(display for _, display in result.issues)
+                    msg += f"\n\n⚠️ **Issues:**\n{issue_lines}"
+                else:
+                    msg += "\n\n✅ No issues found."
+                await thread.send(msg)
+            finally:
+                state.memory_in_use -= result.reserved_bytes

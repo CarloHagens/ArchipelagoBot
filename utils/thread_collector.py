@@ -14,7 +14,7 @@ from utils.github import download_apworld_from_github
 from utils.versions import _norm, get_installed_versions, get_version_dir, parse_version
 from utils.yaml_validation import (
     check_yamls_on_server, get_apworld_info, get_builtin_game_names,
-    get_min_ap_version, get_yaml_game, get_yaml_name, get_yaml_requires,
+    get_min_ap_version, get_yaml_game, get_yaml_games, get_yaml_names, get_yaml_requires,
 )
 
 
@@ -147,18 +147,18 @@ async def collect_files_from_thread(
                     else:
                         await thread.send(msg)
                     continue
-                yaml_name = get_yaml_name(data)
-                if yaml_name and "{player}" not in yaml_name and yaml_name in seen_yaml_names:
+                yaml_names = [n for n in get_yaml_names(data) if "{player}" not in n]
+                duplicate  = next((n for n in yaml_names if n in seen_yaml_names), None)
+                if duplicate:
                     state.memory_in_use   -= attachment.size
                     result.reserved_bytes -= attachment.size
-                    msg = f"{mention} ⚠️ **{safe_name}**: duplicate player name `{yaml_name}` — each YAML must have a unique name."
+                    msg = f"{mention} ⚠️ **{safe_name}**: duplicate player name `{duplicate}` — each YAML must have a unique name."
                     if audit:
                         result.issues.append((f"{message.id}:yaml_duplicate_name:{safe_name}", msg))
                     else:
                         await thread.send(msg)
                     continue
-                if yaml_name and "{player}" not in yaml_name:
-                    seen_yaml_names.add(yaml_name)
+                seen_yaml_names.update(yaml_names)
                 result.yaml_data[safe_name]      = data
                 result.yaml_uploaders[safe_name] = message.author
 
@@ -273,9 +273,9 @@ async def audit_thread(thread, bot_user: discord.User) -> ScanResult:
         for name, info in apworld_infos.items()
         if info.get("game")
     }
-    yaml_games_by_name = {name: get_yaml_game(data) for name, data in result.yaml_data.items()}
+    yaml_games_by_name = {name: get_yaml_games(data) for name, data in result.yaml_data.items()}
 
-    yaml_games_normalised = {_norm(game) for game in yaml_games_by_name.values() if game}
+    yaml_games_normalised = {_norm(game) for games in yaml_games_by_name.values() for game in games}
     for norm_key, apworld_name in apworld_keys_norm.items():
         has_yaml = any(
             _norm_match(norm_key, game_norm)
@@ -292,21 +292,17 @@ async def audit_thread(thread, bot_user: discord.User) -> ScanResult:
     if result.yaml_data:
         yamls_to_validate = {}
         for name, data in result.yaml_data.items():
-            game = yaml_games_by_name[name]
-            if builtin_games and game not in builtin_games:
-                norm_game   = _norm(game)
-                has_apworld = any(
-                    _norm_match(nk, norm_game)
-                    for nk in apworld_keys_norm
-                )
-                if not has_apworld:
-                    uploader = result.yaml_uploaders.get(name)
-                    mention  = uploader.mention if uploader else ""
-                    result.issues.append((
-                        f"missing_apworld:{name}",
-                        f"{mention} ⚠️ **{name}**: game \"{game}\" is not a built-in world — please provide a `.apworld` file for it.",
-                    ))
-            else:
+            games = yaml_games_by_name[name]
+            for game in games:
+                if builtin_games and game not in builtin_games:
+                    if not any(_norm_match(nk, _norm(game)) for nk in apworld_keys_norm):
+                        uploader = result.yaml_uploaders.get(name)
+                        mention  = uploader.mention if uploader else ""
+                        result.issues.append((
+                            f"missing_apworld:{name}:{game}",
+                            f"{mention} ⚠️ **{name}**: game \"{game}\" is not a built-in world — please provide a `.apworld` file for it.",
+                        ))
+            if any(game in builtin_games for game in games):
                 yamls_to_validate[name] = data
 
         for yaml_name, yaml_bytes in result.yaml_data.items():
