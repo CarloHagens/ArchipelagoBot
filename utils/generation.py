@@ -167,10 +167,6 @@ async def run_generation(
         return False, "Generation failed but no log file was found.", []
 
     log_text = new_logs[0].read_text(encoding="utf-8", errors="replace")
-    for line in log_text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("ModuleNotFoundError:", "ImportError:")):
-            log.warning(f"Apworld import error: {stripped}")
 
     missing = _find_missing_module(log_text)
     if missing and await _install_missing_module(missing, version_dir):
@@ -191,6 +187,7 @@ async def run_generation(
         if retry_new_logs:
             log_text = retry_new_logs[0].read_text(encoding="utf-8", errors="replace")
 
+    _log_generation_failure(log_text)
     return False, parse_generation_error(log_text), []
 
 
@@ -255,12 +252,32 @@ def parse_sphere_count(zip_path: Path) -> int | None:
     return len(re.findall(r'^[1-9]\d*: \{', playthrough.group(1), re.MULTILINE)) or None
 
 
+def _log_generation_failure(log_text: str) -> None:
+    lines = log_text.splitlines()
+    last_tb = next(
+        (i for i in range(len(lines) - 1, -1, -1) if "Traceback (most recent call last)" in lines[i]),
+        None,
+    )
+    if last_tb is not None:
+        log.warning("Generation traceback:\n" + "\n".join(lines[last_tb:]))
+    else:
+        error_lines = [
+            l for l in lines
+            if any(kw in l for kw in ("Exception", "Error", "invalid", "failed"))
+            and "logging initialized" not in l
+        ]
+        log.warning("Generation errors:\n" + "\n".join(error_lines[-20:]) if error_lines else "Generation failed, no traceback found.")
+
+
 def parse_generation_error(log_text: str) -> str | tuple:
     lines    = log_text.splitlines()
     stripped = [line.strip() for line in lines]
 
     no_world = next((line for line in stripped if line.startswith("Exception: No world found")), None)
     if no_world:
+        has_traceback = any("Traceback (most recent call last)" in line for line in lines)
+        if has_traceback:
+            return "An error occurred during generation."
         return no_world.split(":", 1)[1].strip().split(".")[0] + "."
 
     rom_missing = next((line for line in stripped if "does not exist, but" in line and "rom_file" in line), None)
@@ -271,13 +288,13 @@ def parse_generation_error(log_text: str) -> str | tuple:
     invalid_lines = [line for line in stripped if line.startswith(NUMBERED_LINE_PREFIXES) and "is invalid" in line]
     if invalid_lines:
         msg, filenames = _parse_invalid_files(invalid_lines)
-        friendly = [line for line in stripped if line.startswith(("Exception:", "ValueError:"))]
+        friendly = [line for line in stripped if line.startswith(("Exception:", "ValueError:", "AssertionError:"))]
         detail = _parse_friendly_errors(friendly)
         if detail:
             msg = f"{msg}\n{detail}"
         return msg, filenames
 
-    friendly = [line for line in stripped if line.startswith(("Exception:", "ValueError:"))]
+    friendly = [line for line in stripped if line.startswith(("Exception:", "ValueError:", "AssertionError:"))]
     if friendly:
         return _parse_friendly_errors(friendly)
 
