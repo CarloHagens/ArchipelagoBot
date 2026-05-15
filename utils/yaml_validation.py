@@ -55,6 +55,17 @@ def get_builtin_game_names(version_dir) -> frozenset[str]:
     return frozenset(games)
 
 
+def get_yaml_name(yaml_bytes: bytes) -> str | None:
+    try:
+        data = yaml.safe_load(yaml_bytes)
+        if not isinstance(data, dict):
+            return None
+        name = data.get("name")
+        return str(name).strip() if name else None
+    except Exception:
+        return None
+
+
 def get_yaml_game(yaml_bytes: bytes) -> str | None:
     try:
         data = yaml.safe_load(yaml_bytes)

@@ -7,14 +7,14 @@ import discord
 import state
 from config import (
     MAX_APWORLD_BYTES, MAX_APWORLD_FILES, MAX_GENERATION_MEMORY,
-    MAX_YAML_BYTES, MAX_YAML_FILES, MSG_MEMORY_FULL, GITHUB_RELEASE_RE,
+    MAX_YAML_BYTES, MAX_YAML_FILES, MSG_MEMORY_FULL, GITHUB_RELEASE_RE, log,
 )
 from utils.files import apworld_stem, normalise_yaml_bytes, safe_filename
 from utils.github import download_apworld_from_github
 from utils.versions import _norm, get_installed_versions, get_version_dir, parse_version
 from utils.yaml_validation import (
     check_yamls_on_server, get_apworld_info, get_builtin_game_names,
-    get_min_ap_version, get_yaml_game, get_yaml_requires,
+    get_min_ap_version, get_yaml_game, get_yaml_name, get_yaml_requires,
 )
 
 
@@ -26,6 +26,7 @@ def _norm_match(a: str, b: str) -> bool:
 class ScanResult:
     yaml_data:         dict = field(default_factory=dict)
     apworld_data:      dict = field(default_factory=dict)
+    apworld_infos:     dict = field(default_factory=dict)
     yaml_uploaders:    dict = field(default_factory=dict)
     apworld_uploaders: dict = field(default_factory=dict)
     reserved_bytes:    int  = 0
@@ -94,6 +95,7 @@ async def collect_files_from_thread(
 ) -> ScanResult:
     result             = ScanResult()
     seen_apworld_stems = set()
+    seen_yaml_names:  set = set()
     seen_repos: dict   = {}
 
     def abort() -> ScanResult:
@@ -134,7 +136,30 @@ async def collect_files_from_thread(
 
                 state.memory_in_use   += attachment.size
                 result.reserved_bytes += attachment.size
-                result.yaml_data[safe_name]      = normalise_yaml_bytes(await attachment.read())
+                data = normalise_yaml_bytes(await attachment.read())
+                if not get_yaml_game(data):
+                    state.memory_in_use   -= attachment.size
+                    result.reserved_bytes -= attachment.size
+                    log.warning(f"Skipping {safe_name} from {message.author}: no game field found")
+                    msg = f"{mention} ⚠️ **{safe_name}**: invalid YAML — skipping."
+                    if audit:
+                        result.issues.append((f"{message.id}:yaml_no_game:{safe_name}", msg))
+                    else:
+                        await thread.send(msg)
+                    continue
+                yaml_name = get_yaml_name(data)
+                if yaml_name and "{player}" not in yaml_name and yaml_name in seen_yaml_names:
+                    state.memory_in_use   -= attachment.size
+                    result.reserved_bytes -= attachment.size
+                    msg = f"{mention} ⚠️ **{safe_name}**: duplicate player name `{yaml_name}` — each YAML must have a unique name."
+                    if audit:
+                        result.issues.append((f"{message.id}:yaml_duplicate_name:{safe_name}", msg))
+                    else:
+                        await thread.send(msg)
+                    continue
+                if yaml_name and "{player}" not in yaml_name:
+                    seen_yaml_names.add(yaml_name)
+                result.yaml_data[safe_name]      = data
                 result.yaml_uploaders[safe_name] = message.author
 
             elif name.endswith(".apworld"):
@@ -170,7 +195,20 @@ async def collect_files_from_thread(
 
                 state.memory_in_use   += attachment.size
                 result.reserved_bytes += attachment.size
-                result.apworld_data[safe_name]      = await attachment.read()
+                data = await attachment.read()
+                info = get_apworld_info(data)
+                if not info["game"]:
+                    state.memory_in_use   -= attachment.size
+                    result.reserved_bytes -= attachment.size
+                    log.warning(f"Skipping {safe_name} from {message.author}: not a valid apworld")
+                    msg = f"{mention} ⚠️ **{safe_name}**: invalid apworld — skipping."
+                    if audit:
+                        result.issues.append((f"{message.id}:apworld_invalid:{safe_name}", msg))
+                    else:
+                        await thread.send(msg)
+                    continue
+                result.apworld_data[safe_name]      = data
+                result.apworld_infos[safe_name]     = info
                 result.apworld_uploaders[safe_name] = message.author
                 seen_apworld_stems.add(stem)
 
@@ -192,9 +230,19 @@ async def collect_files_from_thread(
                         return result
                     await thread.send(MSG_MEMORY_FULL)
                     return abort()
+                info = get_apworld_info(data)
+                if not info["game"]:
+                    log.warning(f"Skipping {filename} from {message.author}: not a valid apworld")
+                    msg = f"{message.author.mention} ⚠️ **{filename}**: invalid apworld — skipping."
+                    if audit:
+                        result.issues.append((f"{message.id}:apworld_invalid:{filename}", msg))
+                    else:
+                        await thread.send(msg)
+                    continue
                 state.memory_in_use   += file_size
                 result.reserved_bytes += file_size
                 result.apworld_data[filename]      = data
+                result.apworld_infos[filename]     = info
                 result.apworld_uploaders[filename] = message.author
 
     return result
@@ -206,7 +254,7 @@ async def audit_thread(thread, bot_user: discord.User) -> ScanResult:
     versions      = get_installed_versions()
     builtin_games = get_builtin_game_names(get_version_dir(versions[0])) if versions else set()
 
-    apworld_infos = {name: get_apworld_info(data) for name, data in result.apworld_data.items()}
+    apworld_infos = result.apworld_infos
 
     min_ap_ver = get_min_ap_version(result.yaml_data, apworld_infos=apworld_infos)
     if min_ap_ver:
@@ -227,12 +275,11 @@ async def audit_thread(thread, bot_user: discord.User) -> ScanResult:
     }
     yaml_games_by_name = {name: get_yaml_game(data) for name, data in result.yaml_data.items()}
 
-    yaml_games_normalised = {_norm(game or "") for game in yaml_games_by_name.values()}
+    yaml_games_normalised = {_norm(game) for game in yaml_games_by_name.values() if game}
     for norm_key, apworld_name in apworld_keys_norm.items():
         has_yaml = any(
             _norm_match(norm_key, game_norm)
             for game_norm in yaml_games_normalised
-            if game_norm
         )
         if not has_yaml:
             uploader = result.apworld_uploaders.get(apworld_name)
@@ -247,7 +294,7 @@ async def audit_thread(thread, bot_user: discord.User) -> ScanResult:
         for name, data in result.yaml_data.items():
             game = yaml_games_by_name[name]
             if builtin_games and game not in builtin_games:
-                norm_game   = _norm(game or "")
+                norm_game   = _norm(game)
                 has_apworld = any(
                     _norm_match(nk, norm_game)
                     for nk in apworld_keys_norm

@@ -15,6 +15,13 @@ from utils.thread_collector import audit_thread
 log = logging.getLogger('bot')
 
 
+def _has_relevant_attachments(message: discord.Message) -> bool:
+    return any(
+        a.filename.lower().endswith((".yaml", ".yml", ".apworld"))
+        for a in message.attachments
+    )
+
+
 class MonitorCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -31,6 +38,8 @@ class MonitorCog(commands.Cog):
             return
         if not is_monitored(message.channel):
             return
+        if not _has_relevant_attachments(message):
+            return
         try:
             await self._check_monitored_thread(message.channel)
         except Exception:
@@ -39,6 +48,8 @@ class MonitorCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message_delete(self, message: discord.Message):
         if not is_monitored(message.channel):
+            return
+        if not _has_relevant_attachments(message):
             return
         try:
             await self._check_monitored_thread(message.channel)
@@ -49,9 +60,11 @@ class MonitorCog(commands.Cog):
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         if after.author == self.bot.user:
             return
-        if before.content == after.content and before.attachments == after.attachments:
+        if before.attachments == after.attachments:
             return
         if not is_monitored(after.channel):
+            return
+        if not _has_relevant_attachments(before) and not _has_relevant_attachments(after):
             return
         try:
             await self._check_monitored_thread(after.channel)
