@@ -52,15 +52,18 @@ class MonitorCog(commands.Cog):
             log.exception(f"Error in on_message monitor check for thread {message.channel.id}")
 
     @commands.Cog.listener()
-    async def on_message_delete(self, message: discord.Message):
-        if not is_monitored(message.channel):
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        channel = self.bot.get_channel(payload.channel_id)
+        if channel is None or not is_monitored(channel):
             return
-        if not _has_relevant_content(message):
+        cached = payload.cached_message
+        if cached is not None and not _has_relevant_content(cached):
             return
+        # If not cached we can't check relevance — rescan to be safe
         try:
-            await self._check_monitored_thread(message.channel)
+            await self._check_monitored_thread(channel)
         except Exception:
-            log.exception(f"Error in on_message_delete monitor check for thread {message.channel.id}")
+            log.exception(f"Error in on_raw_message_delete monitor check for thread {channel.id}")
 
     @commands.Cog.listener()
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
