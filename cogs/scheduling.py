@@ -186,10 +186,13 @@ class SchedulingCog(commands.Cog):
                 )
             return
 
-        dt = parse_schedule_time(time, timezone)
+        await interaction.response.defer(ephemeral=ephemeral)
+
+        loop = asyncio.get_running_loop()
+        dt = await loop.run_in_executor(None, parse_schedule_time, time, timezone)
         if not dt:
             tz_hint = f" (timezone: `{timezone}`)" if timezone else f" (server timezone: `{TIMEZONE}`)"
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"⚠️ Couldn't parse `{time}` as a future date/time{tz_hint}.",
                 ephemeral=True,
             )
@@ -197,7 +200,7 @@ class SchedulingCog(commands.Cog):
 
         versions = get_installed_versions()
         if version and version not in versions:
-            await interaction.response.send_message(f"⚠️ Version `{version}` is not installed.", ephemeral=True)
+            await interaction.followup.send(f"⚠️ Version `{version}` is not installed.", ephemeral=True)
             return
 
         opts = build_generation_opts(server_password, release, collect, remaining, spoiler, race, password)
@@ -220,7 +223,7 @@ class SchedulingCog(commands.Cog):
         tz_used = timezone or TIMEZONE
         log.info(f"/schedule in #{thread.name} by {interaction.user}: {dt.isoformat()} (tz={tz_used})")
         suffix = " (replaced previous schedule)" if replaced else ""
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"🗓️ Generation scheduled for <t:{ts}:F> (<t:{ts}:R>){suffix}.",
             ephemeral=ephemeral,
         )
