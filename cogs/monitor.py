@@ -37,6 +37,19 @@ class MonitorCog(commands.Cog):
         state.monitors.clear()
         state.monitors.update(load_monitors())
         log.info(f"Monitoring {len(state.monitors)} thread(s).")
+        stale = []
+        for thread_id_str in list(state.monitors):
+            try:
+                channel = await self.bot.fetch_channel(int(thread_id_str))
+                if channel is None:
+                    stale.append(thread_id_str)
+            except discord.NotFound:
+                stale.append(thread_id_str)
+            except Exception:
+                pass
+        for thread_id_str in stale:
+            unregister_monitor(int(thread_id_str))
+            log.info(f"[monitor] Removed stale monitor for deleted thread {thread_id_str}.")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -50,6 +63,12 @@ class MonitorCog(commands.Cog):
             await self._check_monitored_thread(message.channel)
         except Exception:
             log.exception(f"Error in on_message monitor check for thread {message.channel.id}")
+
+    @commands.Cog.listener()
+    async def on_thread_delete(self, thread: discord.Thread):
+        if is_monitored(thread):
+            unregister_monitor(thread.id)
+            log.info(f"[monitor] Thread #{thread.name} deleted — monitor unregistered.")
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
