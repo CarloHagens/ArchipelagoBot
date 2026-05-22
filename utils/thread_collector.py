@@ -252,7 +252,8 @@ async def audit_thread(thread, bot_user: discord.User) -> ScanResult:
     result = await collect_files_from_thread(thread, bot_user, audit=True)
 
     versions      = get_installed_versions()
-    builtin_games = get_builtin_game_names(get_version_dir(versions[0])) if versions else set()
+    version_dir   = get_version_dir(versions[0]) if versions else None
+    builtin_games = get_builtin_game_names(version_dir) if version_dir else set()
 
     apworld_infos = result.apworld_infos
 

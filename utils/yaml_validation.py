@@ -1,13 +1,16 @@
 import functools
 import io
 import json
+import os
 import re
+import subprocess
+import sys
 import zipfile
 
 import requests
 import yaml
 
-from config import ARCHIPELAGO_BASE
+from config import ARCHIPELAGO_BASE, log
 
 from utils.versions import _norm, parse_version
 
@@ -41,18 +44,42 @@ def check_yamls_on_server(yaml_files: dict[str, bytes]) -> dict[str, str]:
 
 @functools.lru_cache(maxsize=8)
 def get_builtin_game_names(version_dir) -> frozenset[str]:
-    games: set[str] = set()
-    worlds_dir = version_dir / "worlds"
-    if worlds_dir.exists():
-        for py_file in worlds_dir.glob("*/*.py"):
-            try:
-                for match in WORLD_GAME_RE.finditer(
-                    py_file.read_text(encoding="utf-8", errors="replace"),
-                ):
-                    games.add(match.group(1))
-            except Exception:
-                pass
-    return frozenset(games)
+    try:
+        env = {
+            **{k: v for k, v in os.environ.items() if k not in ("BOT_TOKEN", "SERVER_PASSWORD")},
+            "PYTHONPATH": str(version_dir),
+            "PYTHONUSERBASE": f"/archipelago/pyenv/{version_dir.name}",
+        }
+        _script = (
+            "import sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import worlds\n"
+            "from worlds.AutoWorld import AutoWorldRegister\n"
+            "import inspect\n"
+            "names = []\n"
+            "for n, c in AutoWorldRegister.world_types.items():\n"
+            "    try:\n"
+            "        f = inspect.getfile(c)\n"
+            "    except Exception:\n"
+            "        f = ''\n"
+            "    if '.apworld' not in f:\n"
+            "        names.append(n)\n"
+            "print('\\n'.join(names))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", _script, str(version_dir)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        if result.returncode == 0:
+            return frozenset(line.strip() for line in result.stdout.splitlines() if line.strip())
+        log.warning(f"AutoWorldRegister query failed (rc={result.returncode}):\n{result.stderr.strip()}")
+    except Exception as e:
+        log.warning(f"AutoWorldRegister query exception: {e}")
+    log.warning(f"Could not query AutoWorldRegister for {version_dir.name} — returning empty set.")
+    return frozenset()
 
 
 def _iter_yaml_docs(yaml_bytes: bytes):
