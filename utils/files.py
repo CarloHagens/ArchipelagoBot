@@ -17,7 +17,11 @@ def load_json_file(path: Path, default):
 def normalise_yaml_bytes(raw: bytes) -> bytes:
     if raw.startswith(UTF8_BOM):
         raw = raw[len(UTF8_BOM):]
-    return raw.replace(b'\r\n', b'\n')
+    raw = raw.replace(b'\r\n', b'\n')
+    # Strip trailing whitespace (including tabs) from each line — PyYAML is
+    # strict about tabs and will raise a ScannerError on trailing tabs.
+    raw = b'\n'.join(line.rstrip() for line in raw.split(b'\n'))
+    return raw
 
 
 def apworld_stem(filename: str) -> str:

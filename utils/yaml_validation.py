@@ -87,8 +87,8 @@ def _iter_yaml_docs(yaml_bytes: bytes):
         for doc in yaml.safe_load_all(yaml_bytes):
             if isinstance(doc, dict):
                 yield doc
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"YAML parse error: {e}")
 
 
 def get_yaml_names(yaml_bytes: bytes) -> list[str]:
