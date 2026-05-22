@@ -41,6 +41,24 @@ class SchedulingCog(commands.Cog):
             except asyncio.CancelledError:
                 pass
         state.checker_task = asyncio.create_task(self._schedule_checker_loop())
+        stale = []
+        for job in state.scheduled:
+            try:
+                channel = await self.bot.fetch_channel(job["thread_id"])
+                if channel is None:
+                    stale.append(job["thread_id"])
+            except discord.NotFound:
+                stale.append(job["thread_id"])
+            except Exception:
+                pass
+        for thread_id in stale:
+            remove_scheduled_job(thread_id)
+            log.info(f"[schedule] Removed stale job for deleted thread {thread_id}.")
+
+    @commands.Cog.listener()
+    async def on_thread_delete(self, thread: discord.Thread):
+        if remove_scheduled_job(thread.id):
+            log.info(f"[schedule] Thread #{thread.name} deleted — scheduled generation removed.")
 
     async def _schedule_checker_loop(self) -> None:
         await self.bot.wait_until_ready()
