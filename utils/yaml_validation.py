@@ -91,6 +91,10 @@ def _iter_yaml_docs(yaml_bytes: bytes):
         log.warning(f"YAML parse error: {e}")
 
 
+def count_yaml_players(yaml_bytes: bytes) -> int:
+    return sum(1 for _ in _iter_yaml_docs(yaml_bytes))
+
+
 def get_yaml_names(yaml_bytes: bytes) -> list[str]:
     names = []
     for doc in _iter_yaml_docs(yaml_bytes):

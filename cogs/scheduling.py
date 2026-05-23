@@ -18,6 +18,7 @@ from utils.schedule_helpers import (
     get_scheduled_job, load_scheduled, parse_schedule_time, remove_scheduled_job, save_scheduled,
 )
 from utils.thread_collector import collect_files_from_thread
+from utils.yaml_validation import count_yaml_players
 from utils.versions import get_installed_versions, get_version_dir
 
 log = logging.getLogger('bot')
@@ -112,8 +113,9 @@ class SchedulingCog(commands.Cog):
                     await thread.send("⚠️ Scheduled generation: no YAML files found in this thread.")
                 return
 
-            seed_label = "seed" if count == 1 else f"{count} seeds"
-            await thread.send(f"⚙️ Found **{len(scan.yaml_data)}** yaml(s) and **{len(scan.apworld_data)}** apworld(s). Generating {seed_label}… this may take a minute.")
+            seed_label  = "seed" if count == 1 else f"{count} seeds"
+            total_yamls = sum(count_yaml_players(d) for d in scan.yaml_data.values())
+            await thread.send(f"⚙️ Found **{total_yamls}** yaml(s) and **{len(scan.apworld_data)}** apworld(s). Generating {seed_label}… this may take a minute.")
 
             await execute_generation(
                 self.bot.user, thread, job.get("opts", {}), version_dir,

@@ -14,6 +14,7 @@ from utils.autocomplete import version_autocomplete
 from utils.generation import execute_generation
 from utils.versions import get_installed_versions, get_version_dir
 from utils.thread_collector import collect_files_from_thread
+from utils.yaml_validation import count_yaml_players
 
 log = logging.getLogger('bot')
 
@@ -108,8 +109,9 @@ class GenerationCog(commands.Cog):
                     await thread.send("⚠️ No YAML files found in this thread — nothing to generate.")
                 return
 
-            seed_label = "seed" if count == 1 else f"{count} seeds"
-            await thread.send(f"⚙️ Found **{len(yaml_data)}** yaml(s) and **{len(apworld_data)}** apworld(s). Generating {seed_label}… this may take a minute.")
+            seed_label    = "seed" if count == 1 else f"{count} seeds"
+            total_yamls   = sum(count_yaml_players(d) for d in yaml_data.values())
+            await thread.send(f"⚙️ Found **{total_yamls}** yaml(s) and **{len(apworld_data)}** apworld(s). Generating {seed_label}… this may take a minute.")
 
             gen_opts = build_generation_opts(server_password, release, collect, remaining, spoiler, race, password)
             await execute_generation(self.bot.user, thread, gen_opts, version_dir, yaml_data, apworld_data, yaml_uploaders, count, dry_run=dry_run == "yes", host=host)

@@ -8,6 +8,7 @@ import state
 from cogs import is_thread
 from state import get_audit_lock
 from utils.thread_collector import audit_thread
+from utils.yaml_validation import count_yaml_players
 
 log = logging.getLogger('bot')
 
@@ -31,9 +32,10 @@ class StatusCog(commands.Cog):
             try:
                 yaml_list    = ", ".join(f"`{f}`" for f in result.yaml_data)    or "none"
                 apworld_list = ", ".join(f"`{f}`" for f in result.apworld_data) or "none"
+                total_yamls  = sum(count_yaml_players(d) for d in result.yaml_data.values())
                 msg = (
                     f"**Files found in this thread:**\n"
-                    f"📄 **YAMLs ({len(result.yaml_data)}):** {yaml_list}\n"
+                    f"📄 **YAMLs ({total_yamls}):** {yaml_list}\n"
                     f"🌍 **APworlds ({len(result.apworld_data)}):** {apworld_list}"
                 )
                 if result.issues:

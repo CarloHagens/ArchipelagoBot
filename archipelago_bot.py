@@ -14,6 +14,7 @@ class ArchipelagoBot(commands.Bot):
         super().__init__(command_prefix=[], intents=intents)
 
     async def setup_hook(self):
+        from cogs.admin import AdminCog
         from cogs.generation import GenerationCog
         from cogs.status import StatusCog
         from cogs.gather import GatherCog
@@ -21,6 +22,7 @@ class ArchipelagoBot(commands.Bot):
         from cogs.scheduling import SchedulingCog
         from cogs.monitor import MonitorCog
 
+        await self.add_cog(AdminCog(self))
         await self.add_cog(GenerationCog(self))
         await self.add_cog(StatusCog(self))
         await self.add_cog(GatherCog(self))

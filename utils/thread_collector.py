@@ -13,7 +13,7 @@ from utils.files import apworld_stem, normalise_yaml_bytes, safe_filename
 from utils.github import download_apworld_from_github
 from utils.versions import _norm, get_installed_versions, get_version_dir, parse_version
 from utils.yaml_validation import (
-    check_yamls_on_server, get_apworld_info, get_builtin_game_names,
+    check_yamls_on_server, count_yaml_players, get_apworld_info, get_builtin_game_names,
     get_min_ap_version, get_yaml_game, get_yaml_games, get_yaml_names, get_yaml_requires,
 )
 
@@ -303,7 +303,7 @@ async def audit_thread(thread, bot_user: discord.User) -> ScanResult:
                             f"missing_apworld:{name}:{game}",
                             f"{mention} ⚠️ **{name}**: game \"{game}\" is not a built-in world — please provide a `.apworld` file for it.",
                         ))
-            if any(game in builtin_games for game in games):
+            if builtin_games and all(game in builtin_games for game in games):
                 yamls_to_validate[name] = data
 
         for yaml_name, yaml_bytes in result.yaml_data.items():
