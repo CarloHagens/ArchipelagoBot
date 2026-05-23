@@ -98,6 +98,7 @@ Archipelago versions and any ROM files are preserved across updates.
 | `/output` | Browse past generation runs and attach a seed to the thread |
 | `/schedule` | Schedule a generation for a future time; run again to update, use `cancel: yes` to remove |
 | `/monitor` | Start live monitoring of the thread — flags issues as files are posted; run again to stop |
+| `/hostyaml` | View or modify a key in `host.yaml` — admin only |
 
 Both `/generate` and `/schedule` share these optional parameters:
 
@@ -127,3 +128,11 @@ Both `/generate` and `/schedule` share these optional parameters:
 | `time` | Natural language — e.g. `friday 8pm`, `in 2 hours`, `2026-05-15 20:00` | *(required)* |
 | `timezone` | Timezone name — e.g. `Europe/London`, `America/New_York` | Server default (`TIMEZONE` env var) |
 | `cancel` | `yes` | *(off)* |
+
+`/hostyaml` parameters:
+
+| Parameter | Description | Default |
+|---|---|---|
+| `key` | Key name to view or modify. Use a dotted path (e.g. `stardew_valley_options.allow_jojapocalypse`) if the key appears at multiple levels | *(required)* |
+| `value` | Value to set — parsed as YAML so `true`/`false`, numbers, and strings all work. Leave blank to view the current value | *(view only)* |
+| `version` | Archipelago version whose `host.yaml` to modify | latest |
