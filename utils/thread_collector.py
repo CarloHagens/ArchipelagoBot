@@ -251,9 +251,13 @@ async def collect_files_from_thread(
 async def audit_thread(thread, bot_user: discord.User) -> ScanResult:
     result = await collect_files_from_thread(thread, bot_user, audit=True)
 
-    versions      = get_installed_versions()
-    version_dir   = get_version_dir(versions[0]) if versions else None
-    builtin_games = get_builtin_game_names(version_dir) if version_dir else set()
+    versions    = get_installed_versions()
+    version_dir = get_version_dir(versions[0]) if versions else None
+    loop        = asyncio.get_running_loop()
+    builtin_games = (
+        await loop.run_in_executor(None, get_builtin_game_names, version_dir)
+        if version_dir else set()
+    )
 
     apworld_infos = result.apworld_infos
 
