@@ -37,11 +37,11 @@ class OutputCog(commands.Cog):
             await interaction.response.send_message("⚠️ Zip file no longer exists on disk.", ephemeral=True)
             return
 
-        await interaction.response.send_message(f"📦 Attaching `{zip_path.name}`…")
+        await interaction.response.defer()
         try:
-            await interaction.channel.send(file=discord.File(zip_path))
+            await interaction.followup.send(f"📦 Attaching `{zip_path.name}`…", file=discord.File(zip_path))
         except discord.HTTPException as e:
             if e.status == 413:
-                await interaction.channel.send("⚠️ File is too large to attach for this server.")
+                await interaction.followup.send("⚠️ File is too large to attach for this server.")
             else:
-                await interaction.channel.send(f"⚠️ Failed to attach file: `{e}`")
+                await interaction.followup.send(f"⚠️ Failed to attach file: `{e}`")
