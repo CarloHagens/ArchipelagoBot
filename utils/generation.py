@@ -295,7 +295,7 @@ def parse_generation_error(log_text: str) -> str | tuple:
 def _truncate_error(text: str, limit: int = 3800) -> str:
     if len(text) <= limit:
         return text
-    return text[:limit] + "\n… (truncated)"
+    return "… (truncated)\n" + text[-limit:]
 
 
 def _parse_invalid_files(invalid_lines: list) -> tuple:
