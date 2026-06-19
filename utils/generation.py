@@ -361,8 +361,10 @@ async def execute_generation(
 
     if count == 1:
         success, error, new_zips = await run_generation(opts, version_dir, yaml_data, apworld_data)
-        if not success and isinstance(error, str) and "FillError" in error:
-            await thread.send("⚠️ Fill failed due to randomness — retrying with a new seed…")
+        for attempt in range(1, 6):
+            if success or not isinstance(error, str) or "FillError" not in error:
+                break
+            await thread.send(f"⚠️ Fill failed due to randomness — retrying (attempt {attempt}/5)…")
             success, error, new_zips = await run_generation(opts, version_dir, yaml_data, apworld_data)
         if not success:
             if isinstance(error, tuple):
