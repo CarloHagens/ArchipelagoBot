@@ -296,11 +296,6 @@ def parse_generation_error(log_text: str) -> str | tuple:
     return "\n".join(error_lines[-10:]) if error_lines else log_text[-1500:]
 
 
-def _truncate_error(text: str, limit: int = 3800) -> str:
-    if len(text) <= limit:
-        return text
-    return "… (truncated)\n" + text[-limit:]
-
 
 def _parse_invalid_files(invalid_lines: list) -> tuple:
     msgs, filenames = [], []
@@ -370,9 +365,9 @@ async def execute_generation(
             if isinstance(error, tuple):
                 msg, bad_files = error
                 mentions = " ".join(yaml_uploaders[f].mention for f in bad_files if f in yaml_uploaders)
-                await thread.send(f"❌ Generation failed{' ' + mentions if mentions else ''}:\n```\n{_truncate_error(msg)}\n```")
+                await thread.send(f"❌ Generation failed{' ' + mentions if mentions else ''}:\n```\n{msg}\n```")
             else:
-                await thread.send(f"❌ Generation failed:\n```\n{_truncate_error(str(error))}\n```")
+                await thread.send(f"❌ Generation failed:\n```\n{error}\n```")
             return
         if not new_zips:
             await thread.send("✅ Generator finished, but no new zip found in output/. Check the logs.")
@@ -396,7 +391,7 @@ async def execute_generation(
         succeeded, new_zips, errors = await run_generations(count, opts, version_dir, yaml_data, apworld_data)
         if not new_zips:
             error_detail = "\n".join(str(e) for e in errors if e) if errors else "Check the logs."
-            await thread.send(f"❌ All {count} generations failed:\n```\n{_truncate_error(error_detail)}\n```")
+            await thread.send(f"❌ All {count} generations failed:\n```\n{error_detail}\n```")
             return
         zips_with_counts = [(p, parse_sphere_count(p)) for p in new_zips]
         run = record_run(thread.id, thread.name, version, zips_with_counts)
