@@ -195,34 +195,46 @@ async def run_generations(
     lock_file      = version_dir / ".generating"
 
     loop = asyncio.get_running_loop()
-    originals   = await loop.run_in_executor(None, apply_host_yaml_options, opts, host_yaml_path)
+    originals = await loop.run_in_executor(None, apply_host_yaml_options, opts, host_yaml_path)
     logs_dir.mkdir(exist_ok=True)
-    before_logs = set(logs_dir.glob("Generate_*.txt"))
 
-    async def one_run() -> tuple[int, list[Path]]:
-        return await _run_one_generation(version_dir, yaml_data, apworld_data)
+    async def run_one_with_retry() -> tuple[bool, str | tuple, list[Path]]:
+        log_text = ""
+        error: str | tuple = "Generation failed but no log file was found."
+        for attempt in range(6):  # initial + up to 5 retries
+            before = set(logs_dir.glob("Generate_*.txt"))
+            rc, zips = await _run_one_generation(version_dir, yaml_data, apworld_data)
+            if rc == 0:
+                return True, "", zips
+            after = set(logs_dir.glob("Generate_*.txt"))
+            new_logs = sorted(after - before, key=lambda p: p.stat().st_mtime, reverse=True)
+            if not new_logs:
+                return False, "Generation failed but no log file was found.", []
+            log_text = new_logs[0].read_text(encoding="utf-8", errors="replace")
+            error = parse_generation_error(log_text)
+            if not isinstance(error, str) or "FillError" not in error:
+                _log_generation_failure(log_text)
+                return False, error, []
+            if attempt < 5:
+                log.info(f"FillError on attempt {attempt + 1}/6 for a seed, retrying...")
+        _log_generation_failure(log_text)
+        return False, error, []
 
     log.info(f"Running {count} generation(s) for version {version_dir.name} (max {MAX_PARALLEL_GENERATIONS} parallel)...")
     lock_file.touch()
     try:
-        results = await asyncio.gather(*[one_run() for _ in range(count)])
+        results = await asyncio.gather(*[run_one_with_retry() for _ in range(count)])
     finally:
         lock_file.unlink(missing_ok=True)
 
     await loop.run_in_executor(None, restore_host_yaml, originals, host_yaml_path)
 
-    succeeded = sum(1 for rc, _ in results if rc == 0)
+    succeeded = sum(1 for ok, _, _ in results if ok)
     new_zips  = sorted(
-        (p for _, zips in results for p in zips),
+        (p for ok, _, zips in results if ok for p in zips),
         key=lambda p: p.stat().st_mtime,
     )
-
-    if succeeded < count:
-        after_logs = set(logs_dir.glob("Generate_*.txt"))
-        new_logs   = sorted(after_logs - before_logs, key=lambda p: p.stat().st_mtime)
-        errors     = [parse_generation_error(p.read_text(encoding="utf-8", errors="replace")) for p in new_logs]
-    else:
-        errors = []
+    errors = [err for ok, err, _ in results if not ok]
 
     log.info(f"{succeeded}/{count} generation(s) succeeded, {len(new_zips)} zip(s) produced.")
     return succeeded, new_zips, errors
