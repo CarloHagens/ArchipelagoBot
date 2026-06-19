@@ -252,6 +252,10 @@ def parse_generation_error(log_text: str) -> str | tuple:
     lines    = log_text.splitlines()
     stripped = [line.strip() for line in lines]
 
+    fill_error = next((line for line in stripped if line.startswith("Fill.FillError:")), None)
+    if fill_error:
+        return fill_error.split("Missing:")[0].strip()
+
     rom_missing = next((line for line in stripped if "does not exist, but" in line and "rom_file" in line), None)
     if rom_missing:
         fname = rom_missing.split("FileNotFoundError:")[-1].strip().split(" does not exist")[0].strip()
