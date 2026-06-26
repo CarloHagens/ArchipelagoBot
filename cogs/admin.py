@@ -5,7 +5,6 @@ import yaml
 from discord import app_commands
 from discord.ext import commands
 
-from utils.autocomplete import version_autocomplete
 from utils.versions import get_installed_versions, get_version_dir
 
 log = logging.getLogger('bot')
@@ -35,6 +34,11 @@ def _set_nested(obj, path: tuple, value) -> None:
     obj[path[-1]] = value
 
 
+async def _version_autocomplete(interaction: discord.Interaction, current: str):
+    versions = get_installed_versions()
+    return [app_commands.Choice(name=v, value=v) for v in versions if current.lower() in v.lower()][:25]
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -45,7 +49,7 @@ class AdminCog(commands.Cog):
         value="Value to set. Leave blank to view the current value.",
         version="Archipelago version to modify (default: latest)",
     )
-    @app_commands.autocomplete(version=version_autocomplete)
+    @app_commands.autocomplete(version=_version_autocomplete)
     async def hostyaml(
         self,
         interaction: discord.Interaction,
