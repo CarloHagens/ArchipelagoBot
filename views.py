@@ -49,7 +49,7 @@ class SeedSelect(discord.ui.Select):
 
 class SeedSelectView(discord.ui.View):
     def __init__(self, zips_with_counts: list[tuple[Path, int | None]], thread, run_id: str, host: str | None = None):
-        super().__init__(timeout=300)
+        super().__init__(timeout=900)
         self.add_item(SeedSelect(zips_with_counts, thread, run_id, host=host))
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
