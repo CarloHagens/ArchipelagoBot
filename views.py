@@ -50,7 +50,17 @@ class SeedSelect(discord.ui.Select):
 class SeedSelectView(discord.ui.View):
     def __init__(self, zips_with_counts: list[tuple[Path, int | None]], thread, run_id: str, host: str | None = None):
         super().__init__(timeout=900)
+        self.message: discord.Message | None = None
         self.add_item(SeedSelect(zips_with_counts, thread, run_id, host=host))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(content="Pick a seed to upload: *(expired — use `/output` to upload)*", view=self)
+            except Exception:
+                pass
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
         log.exception(f"Error in SeedSelectView item {item}: {error}")

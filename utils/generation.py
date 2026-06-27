@@ -420,4 +420,4 @@ async def execute_generation(
             return
         unregister_monitor(thread.id)
         view = SeedSelectView(zips_with_counts, thread, run["id"], host=host)
-        await thread.send("Pick a seed to upload:", view=view)
+        view.message = await thread.send("Pick a seed to upload:", view=view)
